@@ -1,0 +1,1242 @@
+---
+title: "EVI-2 Manuscript"
+output: html_document
+date: "2024-12-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE,error = FALSE,message = FALSE)
+
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+
+
+library(gginnards)
+library(readxl)
+library(robustlmm)
+library(emmeans)
+library(survival)
+library(ggbeeswarm)
+library(survminer)
+library(ggprism)
+library(forestmodel)
+library(survival)
+library(ggbeeswarm)
+library(MASS)
+library(car)
+library(patchwork)
+library(ranger)
+library(factoextra)
+library(ggplot2)
+library(dplyr)
+library(ggfortify)
+library(ggsci)
+library(timereg)
+library(grDevices)
+library(cmprsk)
+library(readr)
+
+```
+
+# Section {.tabset}
+
+```{r}
+
+df = read_excel(unzip("/varidata/research/projects/jones/computerome/Vitc_Data.zip","EVI2_data_VAI.xlsx"))
+
+#Changed per Stine 20240528
+df[df$ID == 64,]$Diagnosis_simple_baseline = "MDS"
+
+df$Treatment_arm = ifelse(df$Treatment_arm == 0, "Vitamin C","Placebo")
+df$Age = (df$Age_inclusion_days/365.250 )
+df$CCUS = ifelse(df$Diagnosis_simple_baseline =="CCUS","CCUS","NonCCUS")
+df$CCUS = as.numeric(factor(df$CCUS,levels=c("NonCCUS","CCUS")))
+
+
+VAFS = read_excel(unzip("/varidata/research/projects/jones/computerome/Vitc_Data.zip","cura3_20240530.tsv_SUMcuration.xlsx"))
+VAFS$ID = gsub("-CD34.*","",VAFS$Tumor_Sample_Barcode)
+VAFS$Time = substrRight(VAFS$ID,1)
+VAFS$ID = substr(VAFS$ID,1,nchar(VAFS$ID)-2)
+VAFS$ID[VAFS$ID == "AAL-2"] = "AAL-02"
+VAFS$ID[VAFS$ID == "AAL-3"] = "AAL-03"
+VAFS$ID[VAFS$ID == "AAL-4"] = "AAL-04"
+VAFS$ID[VAFS$ID == "AAL-5"] = "AAL-05"
+
+```
+
+## Plasma Vitamin C {.tabset}
+### Figure 2
+
+**Figure 2: Patient plasma vitamin C levels.** A) Composition of all patients, placebo controls, and vitamin C treated individuals with: vitamin C deficiency, inadequate vitamin C, or adequate vitamin C at inclusion; distributions are relatively similar between the two treatment arms. B) Plasma vitamin C levels at each timepoint by treatment arm; p-values were estimated using robust linear mixed-effects model with a random intercept for each individual. C) LOESS smoothed vitamin C levels over time with standard error ribbons. Individuals with *>200 \mumol/L* vitamin C levels were censored in C) to better characterize dispersion among trial participants, all individual measures are shown in panel B).
+
+```{r, fig.height = 14, fig.width=10}
+
+df.sp = subset(df,select = c(ID,Treatment_arm,VitC_PB1,VitC_PB2,VitC_PB3,VitC_PB4,VitC_PB5,Age,Sex,Hb1,CCUS))
+
+df.sp = reshape2::melt(df.sp,id.vars=c("ID","Treatment_arm","Age","Sex","Hb1","CCUS"))
+
+df.sp$variable = factor(df.sp$variable, levels = c("VitC_PB1","VitC_PB2","VitC_PB3","VitC_PB4","VitC_PB5"))
+
+df.sp$variable = case_when(df.sp$variable == "VitC_PB1" ~ 0,
+                               df.sp$variable == "VitC_PB2" ~ 365.25/4,
+                               df.sp$variable == "VitC_PB3" ~ 2*365.25/4,
+                               df.sp$variable == "VitC_PB4" ~ 3*365.25/4,
+                               df.sp$variable == "VitC_PB5" ~ 365.25)
+
+tmp1 = data.frame(variable =12.1/12*365.25,value2 = 11.5,Treatment_arm = "Vitamin C" )
+tmp2 = data.frame(variable =12.1/12*365.25,value2 = 36.5,Treatment_arm = "Vitamin C" )
+
+df.sp$value2 = df.sp$value
+df.sp$value2[df.sp$value>200] = 200
+df.sp$value2[df.sp$value2==200 & df.sp$variable == 182.6250] = NA
+
+p1.fig2 = ggplot(df.sp[!is.na(df.sp$value),],aes(x = 12*as.numeric(variable)/365.25,y=value2,color=Treatment_arm,fill=Treatment_arm))  +    geom_hline(aes(yintercept =50),color = colorRampPalette(c("steelblue3","black"))(5)[1],linewidth=1,linetype="dashed") +
+ geom_hline(aes(yintercept =23),color=colorRampPalette(c("red3","black"))(5)[1],linewidth=1,linetype="dotted") +
+theme_prism() + geom_line(aes(group = ID),alpha=0.15 ) + stat_smooth(se=T,linewidth=1.5,span=1) + scale_color_manual(values =c("black",pal_nejm()(4)[3])) + scale_fill_manual(values =c("black",pal_nejm()(4)[3])) +scale_y_continuous(expand=c(0,0))+ scale_x_continuous(breaks=c(0,3,6,9,12),expand=c(0,0)) +xlab("Months from randomization")+ylab("Vitamin C concentration (\U03BCmol/L)")+
+  geom_text(data=tmp1,color =colorRampPalette(c("red3","black"))(5)[1],label="Deficient",hjust=0) +
+  geom_text(data=tmp2,color =colorRampPalette(c("steelblue3","black"))(5)[1],label="Inadequate",hjust=0) +
+
+  guides(color=guide_legend(title=""),fill=guide_legend(title=""))+coord_cartesian(clip="off")+facet_wrap(~Treatment_arm)+ theme(panel.spacing = unit(2, "lines"))
+
+df.sp$Time = factor(paste0(12*df.sp$variable/365.25,""),levels=seq(0,12,3))
+
+fit = rlmer(log2(value)~Time*Treatment_arm +Age + Sex + CCUS + Hb1+(1|ID),data=df.sp)
+res = data.frame(summary(emmeans(fit,pairwise~Treatment_arm|Time)$contrasts))
+res$Label = ifelse(res$p.value <0.001,"P < 0.001",paste0("P = ",round(res$p.value,3)))
+
+p2.fig2= ggplot()  +   geom_hline(aes(yintercept =23),color="red3",linewidth=1,linetype="dotted") +
+    geom_hline(aes(yintercept =50),color = "steelblue3",linewidth=1,linetype="dashed") +
+theme_prism()+ geom_boxplot(data=df.sp,aes(x = Time,y=value,color=Treatment_arm),outlier.size=-1) + geom_quasirandom(data=df.sp,aes(x = Time,y=value,color=Treatment_arm),alpha=0.25,dodge.width = .75)  + scale_color_manual(values =c("black",pal_nejm()(4)[3]))  +xlab("Months from randomization")+ylab("Vitamin C concentration (\U03BCmol/L)")+
+  annotate(geom="text",x = 6,y = 11.5,color = "red3",label="Deficient",hjust=0) +
+  annotate(geom="text",x = 6,y = 36.5,color = "steelblue3",label="Inadequate",hjust=0) +
+  guides(color=guide_legend(title=""),fill=guide_legend(title=""))+coord_cartesian(clip="off")+scale_y_continuous(breaks=seq(0,300,50)) + geom_text(data=res,aes(label=Label,x=Time,y=260),color="black",fontface="italic")+geom_segment(aes(x = 0.75,xend=1.25,y=240,yend=240))+
+  geom_segment(aes(x = 1.75,xend=2.25,y=240,yend=240))+
+  geom_segment(aes(x = 2.75,xend=3.25,y=240,yend=240))+
+  geom_segment(aes(x = 3.75,xend=4.25,y=240,yend=240))+
+  geom_segment(aes(x = 4.75,xend=5.25,y=240,yend=240))
+
+df.sp$Adequacy = case_when( df.sp$value < 23 ~ "Deficient",
+                            df.sp$value < 50 ~ "Inadequate",
+                            TRUE ~ "Sufficient")
+
+pt = data.frame(prop.table(table(df.sp$Adequacy,df.sp$Time),2))
+
+pt.c = data.frame(prop.table(table(df.sp$Adequacy[df.sp$Treatment_arm=="Vitamin C"],df.sp$Time[df.sp$Treatment_arm=="Vitamin C"]),2))
+
+pt.p = data.frame(prop.table(table(df.sp$Adequacy[df.sp$Treatment_arm=="Placebo"],df.sp$Time[df.sp$Treatment_arm=="Placebo"]),2))
+
+pt$Group = "All Patients (n = 109)"
+pt.c$Group = "Vitamin C (n = 55)"
+pt.p$Group = "Placebo (n = 54)"
+
+pt = rbind(pt,pt.c,pt.p)
+
+pt$Var1 = as.character(pt$Var1)
+
+pt$Var1[pt$Var1 == "Deficient"] = "Deficient (<23 \U03BCmol/L)"
+pt$Var1[pt$Var1 == "Inadequate"] = "Inadequate (23 - 49 \U03BCmol/L)"
+pt$Var1[pt$Var1 == "Sufficient"] = "Adequate (\u226550 \U03BCmol/L)"
+
+
+hsize=1.5
+pt$hsize=hsize
+pt$Freq = round(pt$Freq,2)
+pt$Var1 = factor(pt$Var1,levels=c("Adequate (≥50 μmol/L)",
+                                  "Inadequate (23 - 49 μmol/L)",
+                                  "Deficient (<23 μmol/L)" ))
+
+p2.pi = ggplot(pt[pt$Var2 == 0,],aes(x =hsize,y = Freq,fill=Var1 )) +
+  geom_col() +facet_wrap(~Group)+
+  coord_polar(theta = "y",clip="off") +
+  xlim(c(0.2, hsize + 0.5))+
+  geom_text(aes(label = scales::percent(Freq)),
+          position = position_stack(vjust = 0.5))+
+  theme_prism(base_family = "") + 
+  theme(legend.position = "bottom",
+    panel.background = element_rect(fill = "white"),
+                        panel.grid = element_blank(),
+                        axis.title = element_blank(),
+                        axis.ticks = element_blank(),
+                        axis.text = element_blank(),
+                        axis.line = element_blank()) +
+  scale_fill_manual(values=c("Adequate (≥50 μmol/L)" = "palegreen3","Inadequate (23 - 49 μmol/L)" = "steelblue3","Deficient (<23 μmol/L)" = "red3"),breaks=c("Deficient (<23 μmol/L)"  , 
+                             "Inadequate (23 - 49 μmol/L)",
+                              "Adequate (≥50 μmol/L)"))+ggtitle("Vitamin C concentration in peripheral blood plasma at inclusion")
+
+p2.pi/p2.fig2/p1.fig2+ 
+  plot_annotation(tag_levels = 'A')  & 
+  theme(plot.tag = element_text(size = 15))
+
+# cairo_pdf('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/final_figures/fig2.pdf', width=10, height=14)
+# 
+# p2.pi/p2.fig2/p1.fig2+ 
+#   plot_annotation(tag_levels = 'A')  & 
+#   theme(plot.tag = element_text(size = 15))
+# 
+# dev.off()
+
+```
+
+### Supplemental figure, Vitamin C change over time
+
+
+**Supplemental figure xx. Change in vitamin C over time.** On average patients treated with vitamin C had a 1.9 fold increase in plasma vitamin C levels between their measures at inclusion and those taken at end of therapy (95% CI 1.6, 2.35), while those on placebo had no real change. robust linear mixed-effects model with ratio of vitamin C at EOT divided by vitamin C at inclusion.  
+
+
+```{r, fig.height=5, fig.width = 5.5 }
+fit = lm(VitC_PB5 - VitC_PB1 ~ Treatment_arm,data=df)
+# summary(fit)
+
+p1.delta.c = ggplot(df,aes(x =Treatment_arm,y= VitC_PB5 - VitC_PB1, color=Treatment_arm)) + geom_quasirandom() +
+  geom_boxplot(fill=NA,outliers=F)+scale_color_manual(values =c("black",pal_nejm()(4)[3]))+theme_prism()+theme(legend.position = "none") + xlab("") + ylab("Change in plasma vitamin C \n(End of therapy - Inclusion)") + annotate(geom = "line",x = c(1,2), y = c(135,135)) + annotate(geom="text" , x=1.5,y = 145,label="P < 0.0001 ",fontface="italic")
+
+fit = rlm(log2(VitC_PB5/VitC_PB1) ~ Treatment_arm,data=df)
+
+p2.delta.c = ggplot(df,aes(x =Treatment_arm,y= log2(VitC_PB5/VitC_PB1), color=Treatment_arm)) + geom_quasirandom() +
+  geom_boxplot(fill=NA,outliers=F)+scale_color_manual(values =c("black",pal_nejm()(4)[3]))+theme_prism()+theme(legend.position = "none") + xlab("") + ylab("log2(FC) plasma vitamin C \n(End of therapy - Inclusion)") + annotate(geom = "line",x = c(1,2), y = c(6.5,6.5)) + annotate(geom="text" , x=1.5,y = 7.02,label="P < 0.0001 ",fontface="italic")
+
+
+p2.delta.c
+
+# ggsave("~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/final_figures/change_in_Vitamin_C.pdf",height=5,width=5.5)
+
+
+
+```
+
+## Survival {.tabset}
+Includes all samples, unadjusted. We performed a landmark analysis and also analyzed this same data with peto-peto instead of standard log-rank. Both were still significant, therefore an FDR correction would not change our findings here.
+
+### Primary outcome KM (Figure 3)
+
+**Figure 3. Unadjusted Kaplan-Meier curves for overall survival.** Estimated hazard ratio for vitamin C treated patients versus controls based on an unadjusted Cox proportional hazards regression 0.35, 95% CI 0.17, 0.71.
+
+```{r,fig.width=8, fig.height=9}
+
+df$Years_FU_OS = (df$Days_FU_OS/365.25)
+fit_os = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df)
+
+os.p = ggsurvplot(fit_os,
+           legend.labs =gsub("Treatment_arm=","",names(fit_os$strata)),
+           palette=c("black",pal_nejm()(4)[c(3)]),
+           cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval.method = F,
+           pval=F,legend.title="")
+
+p.y = min(os.p$data.survplot[os.p$data.survplot$Treatment_arm != "Placebo", ]$surv)
+p.c = min(os.p$data.survplot[os.p$data.survplot$Treatment_arm == "Placebo", ]$surv)
+p.os = os.p$plot+theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.y,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 6*365.25,y = p.c,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth = 1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches")) + annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.0025",fontface="italic",hjust=0,size=4.5)
+
+t.os = os.p$table +theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+p.os/t.os +plot_layout(heights = c(1,0.4))
+
+# ggsave('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/final_figures/fig3_os.pdf', width=8, height=9)
+
+fit_os.cox = coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df)
+knitr::kable(summary(fit_os.cox)$conf.int,caption="Hazard ratio and CI")
+
+```
+
+### Cox model (No interaction)
+
+
+**Supplemntal figure XX. Forest plot for adjusted Cox model.** Cox proportional hazards regression to estimated efficacy of vitamin C on overall survival was adjusted for patient age at inclusion, gender, hemoglobin levels at inclusion, and whether or not they had been diagnosed with CCUS. 
+
+```{r, fig.width=11, figheight=5}
+
+df$Treatment = as.numeric(factor(df$Treatment_arm,levels=c("Placebo","Vitamin C"),labels=c("Placebo","VitC")))
+
+df$VitaminC = as.numeric(factor(df$Treatment_arm,levels=c("Placebo","Vitamin C"),labels=c("Placebo","VitC")))-1
+
+df$Age_mean_centered = (df$Age-mean(df$Age,na.rm=T))
+
+df$VitaminC_Age_Interaction = as.numeric(as.factor(df$Treatment_arm))*df$Age_mean_centered
+df$Male = df$Sex
+
+labelled::var_label(df) <- list(
+    VitaminC = "Vitamin C", 
+    Age = "Age (years)",
+    Hb1 = "Hemoglobin levels at inclusion (g/dL)",
+    CCUS = "Diagnosed with CCUS (yes/no)"
+)
+
+
+fit.cox.simple =  coxph(Surv(Days_FU_OS,FU_Death)~VitaminC+Age +Male + Hb1 + CCUS,data=df)
+
+panels <- list(
+  list(width = 0.03),
+  list(width = 0.1, display = ~variable, fontface = "bold", heading = "Variable"),
+  list(width = 0.1, display = ~level),
+  list(width = 0.03, item = "vline", hjust = 0.5),
+  list(
+    width = 0.55, item = "forest", hjust = 0.5, heading = "Hazard ratio", linetype = "dashed",
+    line_x = 0
+  ),
+  list(width = 0.05, item = "vline", hjust = 0.5),
+  list(width = 0.12, display = ~ ifelse(reference, "Reference", sprintf(
+    "%0.3f (%0.3f, %0.3f)",
+    trans(estimate), trans(conf.low), trans(conf.high)
+  )), display_na = NA, heading = "HR (95% CI)"),
+    list(width = 0.03, item = "vline", hjust = 0.5),
+  list(
+    width = 0.05,
+    display = ~ ifelse(reference, "", paste0(ifelse(p.value < 0.001,"P ","P = "), format.pval(p.value, digits = 1, eps = 0.001))),
+    display_na = NA, hjust = 0.5,fontface="italic"
+  ),
+  list(width = 0.03)
+)
+
+forest_model(fit.cox.simple,panels) 
+
+# ggsave('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/fig4_forest_no_interaction.pdf', width=11, height=5,device=cairo_pdf)
+
+
+```
+
+
+### Cox model (Age interaction)
+
+**Supplemental figure XX. Forest plot for adjusted Cox model in age interaction.** Cox proportional hazards regression to estimated efficacy of vitamin C as a function of age. Age was mean centered and converted to decades to improve hazard ratio scales. Overall vitamin C was still effective, with evidence that it's efficacy decreases with age.
+
+```{r, fig.width=11, figheight=5}
+
+df$age_c = df$Age - mean(df$Age,na.rm=T)
+df$age_tx = df$age_c * df$VitaminC
+labelled::var_label(df) <- list(
+    VitaminC = "Vitamin C", 
+    age_c = "Age (Years)",
+    age_tx = "Age x Vitamin C",
+    Hb1 = "Hemoglobin levels at inclusion (g/dL)",
+    CCUS = "Diagnosed with CCUS (yes/no)"
+)
+
+fit.cox.age_int =  coxph(Surv(Days_FU_OS,FU_Death)~VitaminC+age_c + age_tx+Male + Hb1 + CCUS,data=df)
+
+forest_model(fit.cox.age_int,panels)
+
+# ggsave('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/fig4_forest_age_interaction.pdf', width=11, height=5,device=cairo_pdf)
+
+
+```
+
+
+### 2-year Landmark 
+
+**Maybe Figure?** A 2 year landmark analysis was performed to determine if there was still evidence of vitamin C efficacy but removing individuals who had events prior to 2 years. This landmark analysis ensures the effects of vitamin C had sufficient time to reach efficacy.
+
+
+```{r}
+
+fit_os.L = survfit(Surv(Days_FU_OS-2*365.25,FU_Death)~Treatment_arm,data=df[df$Days_FU_OS>=2*365.25,])
+
+ggsurvplot(fit_os.L,
+           legend.labs =gsub("Treatment_arm=","",names(fit_os.L$strata)),
+           palette=c("black",pal_nejm()(4)[c(3)]),
+           cumevents=F,
+           risk.table=F,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months post 2-year Landmark",
+           pval=T,
+           legend="right",legend.title="")
+
+```
+
+
+### Subgroups (suppl) {.tabset}
+All subgroup analyses include only the hazard ratio with 95% CI as these are exploratory. 
+
+#### TET1 or IDH1/2 at baseline
+
+**Supplemental Figure XX. Overall survival by TET2 or IDH1/2 mutation status.** Hazard ratio and confidence intervals were estimated using Cox proportional hazards models on data stratified by TET2 and IDH1/2 mutation status. Survival curves and estimates are consistent with the primary outcome.
+
+```{r, fig.width=14, fig.height=9}
+
+mut_ids = unique(VAFS$ID[VAFS$Hugo_Symbol %in% c("TET2","IDH1","IDH2") &VAFS$Time==1])
+df$TET2 = ifelse(df$ID %in% mut_ids,"TET2Mut","TET2neg")
+
+fit_os.no.tet = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$TET2 == "TET2neg",])
+
+p1 = ggsurvplot(fit_os.no.tet,
+           legend.labs =gsub("TET2=","", gsub("Treatment_arm=","",names(fit_os.no.tet$strata))),
+           palette=c("black",pal_nejm()(4)[c(3)]),
+           cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval.method = F,
+           pval=F,legend.title="TET2 Negative")
+
+fit_os.tet = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$TET2 == "TET2Mut",])
+
+p2 = ggsurvplot(fit_os.tet,
+           legend.labs =gsub("TET2=","", gsub("Treatment_arm=","",names(fit_os.tet$strata))),
+palette=c("black",pal_nejm()(4)[c(3)]),
+cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval.method = F,
+           pval=F,legend.title="TET2 Positive")
+
+p.y1 = min(p1$data.survplot[p1$data.survplot$Treatment_arm != "Placebo", ]$surv)
+p.c1 = min(p1$data.survplot[p1$data.survplot$Treatment_arm == "Placebo", ]$surv)
+
+p.y2 = min(p2$data.survplot[p2$data.survplot$Treatment_arm != "Placebo", ]$surv)
+p.c2 = min(p2$data.survplot[p2$data.survplot$Treatment_arm == "Placebo", ]$surv)
+
+
+
+p1$plot = p1$plot + ggtitle(expression("No" ~ italic("TET2") ~ or ~ italic("IDH1/2") ~ "mutations")) + theme(legend.position = "none") +theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.y1,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 6*365.25,y = p.c1,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth = 1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches"))  
+
+HR.no = summary(coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$TET2 == "TET2neg",]))$conf.int
+
+HR.no.anno = paste0("HR = ",round(HR.no[1],2), "\n95% CI ",round(HR.no[3],2),", ",round(HR.no[4],2))
+
+p1$plot = p1$plot + annotate(geom="text", x = 365,y = 0.25, label=HR.no.anno,hjust=0,size=4.5)
+
+  # Dropping p-values in favor of 95% CI as these 
+  # annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.0091",fontface="italic",hjust=0,size=4.5)
+
+p2$plot = p2$plot + ggtitle(expression(italic("TET2") ~ or ~ italic("IDH1/2") ~ "mutation detected")) + theme(legend.position = "none") + theme(legend.position = "none") +theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.y2,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 6*365.25,y = p.c2,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth = 1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches")) 
+
+# + annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.14",fontface="italic",hjust=0,size=4.5)
+
+HR.tet = summary(coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$TET2 == "TET2Mut",]))$conf.int
+
+HR.tet.anno = paste0("HR = ",round(HR.tet[1],2), "\n95% CI ",round(HR.tet[3],2),", ",round(HR.tet[4],2))
+
+p2$plot = p2$plot + annotate(geom="text", x = 365,y = 0.25, label=HR.tet.anno,hjust=0,size=4.5)
+
+
+p1$table = p1$table +theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+p2$table = p2$table +theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+p1$plot  + p2$plot + p1$table +p2$table +plot_layout(ncol=2,heights=c(1,.4))
+
+# ggsave('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/final_figures/sfig_tet2.pdf', width=14, height=9)
+
+```
+
+#### Inclusion Vitamin C Group
+
+**Supplemental figure XX. Overall survival by vitamin C adequacy at inclusion.** Hazard ratio and confidence intervals were estimated using Cox proportional hazards models on data stratified by patients with vitamin C deficiency, inadequacy, or adequacy at inclusion. Results are consistent with the primary outcome, however there is some evidence that vitamin C supplementation in those with adequate vitamin C levels at inclusion may be less effective than supplementation in individuals with less than adequate plasma vitamin C.
+
+```{r, fig.width=18, fig.height=7.75}
+
+df$vitc_group = case_when(df$VitC_PB1 <23 ~ "Deficient",
+                           df$VitC_PB1 <50 ~ "Inadequate",
+                           TRUE ~ "Adequate")
+
+fit_os.d = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$vitc_group == "Deficient",])
+
+p1 = ggsurvplot(fit_os.d,
+           legend.labs =gsub("Treatment_arm=","",names(fit_os.d$strata)),
+           palette=c("black",pal_nejm()(7)[c(3)]),
+           cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval=F,pval.method = F,legend.title="Deficient")
+
+fit_os.ina = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$vitc_group=="Inadequate",])
+
+p2 = ggsurvplot(fit_os.ina,
+           legend.labs =gsub("Treatment_arm=","",names(fit_os.ina$strata)),
+           palette=c("black",pal_nejm()(7)[c(3)]),
+           cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval=F,pval.method = F,legend.title="Inadequate")
+
+fit_os.ade = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$vitc_group=="Adequate",])
+
+p3 = ggsurvplot(fit_os.ade,
+           legend.labs =gsub("Treatment_arm=","",names(fit_os.ade$strata)),
+           palette=c("black",pal_nejm()(7)[c(3)]),
+           cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval=F,pval.method = F,legend.title="CMMLplus")
+
+p.c.d = min(p1$data.survplot$surv[p1$data.survplot$Treatment_arm == "Vitamin C"])
+p.p.d = min(p1$data.survplot$surv[p1$data.survplot$Treatment_arm != "Vitamin C"])
+
+p1$plot = p1$plot +theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.c.d,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 6*365.25,y = p.p.d,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth=1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches")) + ggtitle("Deficient (<23 \U03BCmol/L)")
+
+HR.d = summary(coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$vitc_group == "Deficient",]))$conf.int
+HR.d.anno = paste0("HR = ",round(HR.d[1],2), "\n95% CI ",round(HR.d[3],2),", ",round(HR.d[4],2))
+p1$plot = p1$plot + annotate(geom="text", x = 365,y = 0.25, label=HR.d.anno,hjust=0,size=4.5)
+
+
+# + annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.14",fontface="italic",hjust=0,size=4.5)
+
+p.c.ina = min(p2$data.survplot$surv[p2$data.survplot$Treatment_arm == "Vitamin C"])
+p.p.ina = min(p2$data.survplot$surv[p2$data.survplot$Treatment_arm != "Vitamin C"])
+
+p2$plot = p2$plot +theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.c.ina,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 5*365.25,y = p.p.ina,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth=1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches")) + ggtitle("Inadequate (23-49 \U03BCmol/L)") 
+
+#+ annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.02",fontface="italic",hjust=0,size=4.5)
+
+HR.ina = summary(coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$vitc_group == "Inadequate",]))$conf.int
+HR.ina.anno = paste0("HR = ",round(HR.ina[1],2), "\n95% CI ",round(HR.ina[3],2),", ",round(HR.ina[4],2))
+p2$plot = p2$plot + annotate(geom="text", x = 365,y = 0.25, label=HR.ina.anno,hjust=0,size=4.5)
+
+
+p.c.ada = min(p3$data.survplot$surv[p3$data.survplot$Treatment_arm == "Vitamin C"])
+p.p.ada = min(p3$data.survplot$surv[p3$data.survplot$Treatment_arm != "Vitamin C"])
+
+p3$plot = p3$plot +theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.c.ada,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 6*365.25,y = p.p.ada,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth=1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches"))+ ggtitle("Adequate (\u226550 \U03BCmol/L)") 
+
+# + annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.15",fontface="italic",hjust=0,size=4.5)
+
+HR.ada = summary(coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$vitc_group == "Adequate",]))$conf.int
+HR.ada.anno = paste0("HR = ",round(HR.ada[1],2), "\n95% CI ",round(HR.ada[3],2),", ",round(HR.ada[4],2))
+p3$plot = p3$plot + annotate(geom="text", x = 365,y = 0.25, label=HR.ada.anno,hjust=0,size=4.5)
+
+p1$table = p1$table +theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+p2$table = p2$table +theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+p3$table = p3$table+theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+
+p1$plot + p2$plot + p3$plot +
+  p1$table + p2$table + p3$table + plot_layout(ncol=3,heights=c(1,0.4))
+
+# cairo_pdf('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/vitc_groups.pdf',
+#           width=18, height=8.5)
+# p1$plot + p2$plot + p3$plot +
+#   p1$table + p2$table + p3$table + plot_layout(ncol=3,heights=c(1,0.4)) 
+# dev.off()
+# ggsave('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/vitc_groups.pdf', width=18, height=7.75)
+
+```
+
+#### Above/Below median Vitamin C
+
+**Supplemental figure XX. Overall survival by vitamin C above or below median vitamin C at inclusion.** Hazard ratio and confidence intervals were estimated using Cox proportional hazards models on data stratified by patients with plasma vitamin C levels below the median measure at inclusion, and greater than or equal to the median. Results are consistent with the primary outcome.  
+
+```{r, fig.width=14, fig.height=9}
+
+df$med_vitc = ifelse(df$VitC_PB1 >= median(df$VitC_PB1,na.rm=T),"above","below")
+
+fit_os.vitc.be = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$med_vitc == "below",])
+
+p1 = ggsurvplot(fit_os.vitc.be,
+           legend.labs =gsub("TET2=","", gsub("Treatment_arm=","",names(fit_os.vitc.be$strata))),
+           palette=c("black",pal_nejm()(4)[c(3)]),
+           cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval.method = F,
+           pval=F,legend.title="TET2 Negative")
+
+
+
+fit_os.vitc.a = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$med_vitc == "above",])
+
+p2 = ggsurvplot(fit_os.vitc.a,
+           legend.labs =gsub("TET2=","", gsub("Treatment_arm=","",names(fit_os.vitc.a$strata))),
+palette=c("black",pal_nejm()(4)[c(3)]),
+cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval.method = F,
+           pval=F,legend.title="TET2 Positive")
+
+p.y1 = min(p1$data.survplot[p1$data.survplot$Treatment_arm != "Placebo", ]$surv)
+p.c1 = min(p1$data.survplot[p1$data.survplot$Treatment_arm == "Placebo", ]$surv)
+
+p.y2 = min(p2$data.survplot[p2$data.survplot$Treatment_arm != "Placebo", ]$surv)
+p.c2 = min(p2$data.survplot[p2$data.survplot$Treatment_arm == "Placebo", ]$surv)
+
+p1$plot = p1$plot + ggtitle("Below the median vitamin C levels at inclusion") + theme(legend.position = "none") +theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.y1,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 6*365.25,y = p.c1,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth=1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches")) 
+
+
+
+HR.a = summary(coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$med_vitc == "below",]))$conf.int
+HR.a.anno = paste0("HR = ",round(HR.a[1],2), "\n95% CI ",round(HR.a[3],2),", ",round(HR.a[4],2))
+p1$plot = p1$plot + annotate(geom="text", x = 365,y = 0.25, label=HR.a.anno,hjust=0,size=4.5)
+
+
+# + annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.022",fontface="italic",hjust=0,size=4.5)
+
+
+p2$plot = p2$plot + ggtitle("At or above the median vitamin C levels at inclusion") + theme(legend.position = "none") + theme(legend.position = "none") +theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.y2,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 6*365.25,y = p.c2,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth=1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches")) 
+
+  # annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.047",fontface="italic",hjust=0,size=4.5)
+
+HR.a = summary(coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$med_vitc == "above",]))$conf.int
+HR.a.anno = paste0("HR = ",round(HR.a[1],2), "\n95% CI ",round(HR.a[3],2),", ",round(HR.a[4],2))
+p2$plot = p2$plot + annotate(geom="text", x = 365,y = 0.25, label=HR.a.anno,hjust=0,size=4.5)
+
+p1$table = p1$table +theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+
+p2$table = p2$table +theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+p1$plot  + p2$plot +p1$table +p2$table +plot_layout(ncol=2,heights=c(1,.4))
+
+# ggsave('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/median_vitc_subgroup.pdf', width=14, height=9)
+
+
+```
+
+#### Diagnostic subgroup
+
+**Supplemental figure XX. Overall survival by diagnostic subgroup at inclusion.** Hazard ratio and confidence intervals were estimated using Cox proportional hazards models on data stratified by diagnosis at inclusion. CCUS appears to be a subgroup that can benefit particularly well from vitamin C supplementation. 
+
+```{r, fig.width=18,fig.height=7.75}
+
+df$Diagnosis_simple_combo = case_when(df$Diagnosis_simple_baseline == "CCUS" ~ "CCUS",
+                                      df$Diagnosis_simple_baseline == "MDS" ~ "MDS",
+                                      df$Diagnosis_simple_baseline == "CMML" | df$Diagnosis_simple_baseline == "MDS/MPN"~ "CMML_MDS_MPN",
+                                      TRUE~NA)
+
+fit_os.diags = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm+Diagnosis_simple_combo,data=df)
+
+
+p.a = ggsurvplot(fit_os.diags,
+           legend.labs =gsub("Diagnosis_simple_combo=","",gsub("Treatment_arm=","",names(fit_os.diags$strata))),
+           palette=c("black",pal_nejm()(7)[c(5,2,3,1,7)]),
+           cumevents=F,
+           risk.table=F,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval=T,pval.method = T,
+           title= "All patients",legend.title="")
+
+df$Sex.c = ifelse(df$Sex==1,"Male","Female")
+
+fit_os.CCUS = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$Diagnosis_simple_combo=="CCUS",])
+
+p1 = ggsurvplot(fit_os.CCUS,
+           legend.labs =gsub("Treatment_arm=","",names(fit_os.CCUS$strata)),
+           palette=c("black",pal_nejm()(7)[c(3)]),
+           cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval=F,pval.method = F,legend.title="CCUS")
+
+
+
+fit_os.mds = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$Diagnosis_simple_combo=="MDS",])
+
+p2 = ggsurvplot(fit_os.mds,
+           legend.labs =gsub("Treatment_arm=","",names(fit_os.mds$strata)),
+           palette=c("black",pal_nejm()(7)[c(3)]),
+           cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval=F,pval.method = F,legend.title="MDS")
+
+
+
+fit_os.CMMLplus = survfit(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$Diagnosis_simple_combo=="CMML_MDS_MPN",])
+
+p3 = ggsurvplot(fit_os.CMMLplus,
+           legend.labs =gsub("Treatment_arm=","",names(fit_os.CMMLplus$strata)),
+           palette=c("black",pal_nejm()(7)[c(3)]),
+           cumevents=F,
+           risk.table=T,
+           break.time.by=365.25,
+           xscale="d_m",
+           xlab="Months from randomization",
+           pval=F,pval.method = F,legend.title="CMMLplus")
+
+p.c.ccus = min(p1$data.survplot$surv[p1$data.survplot$Treatment_arm == "Vitamin C"])
+p.p.ccus = min(p1$data.survplot$surv[p1$data.survplot$Treatment_arm != "Vitamin C"])
+
+p1$plot = p1$plot +theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.c.ccus,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 6*365.25,y = p.p.ccus,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth=1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches")) + ggtitle("CCUS")
+
+# + annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.0036",fontface="italic",hjust=0,size=4.5)
+
+HR.ccus = summary(coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$Diagnosis_simple_combo=="CCUS",]))$conf.int
+HR.ccus.anno = paste0("HR = ",ifelse(round(HR.ccus[1],2)<0.01,"< 0.01",round(HR.ccus[1],2)), "\n95% CI ",round(HR.ccus[3],2),", ",round(HR.ccus[4],2))
+p1$plot = p1$plot + annotate(geom="text", x = 365,y = 0.25, label=HR.ccus.anno,hjust=0,size=4.5)
+
+
+p.c.ccus = min(p2$data.survplot$surv[p2$data.survplot$Treatment_arm == "Vitamin C"])
+p.p.ccus = min(p2$data.survplot$surv[p2$data.survplot$Treatment_arm != "Vitamin C"])
+
+p2$plot = p2$plot +theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.c.ccus,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 6*365.25,y = p.p.ccus,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth=1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches"))+ ggtitle("MDS") 
+
+# + annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.29",fontface="italic",hjust=0,size=4.5)
+
+HR.MDS = summary(coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$Diagnosis_simple_combo=="MDS",]))$conf.int
+HR.MDS.anno = paste0("HR = ",round(HR.MDS[1],2), "\n95% CI ",round(HR.MDS[3],2),", ",round(HR.MDS[4],2))
+p3$plot = p3$plot + annotate(geom="text", x = 365,y = 0.25, label=HR.MDS.anno,hjust=0,size=4.5)
+
+
+p.c.ccus = min(p3$data.survplot$surv[p3$data.survplot$Treatment_arm == "Vitamin C"])
+p.p.ccus = min(p3$data.survplot$surv[p3$data.survplot$Treatment_arm != "Vitamin C"])
+
+p3$plot = p3$plot +theme(legend.position = "none") +
+  annotate(geom="text",x = 6*365.25,y = p.c.ccus,label="Vitamin C", color=pal_nejm()(4)[c(3)],hjust=0) + 
+  annotate(geom="text",x = 5*365.25,y = p.p.ccus,label="Placebo", color="black",hjust=0) + 
+  scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+
+  coord_cartesian(clip="off")+theme_prism()+theme(legend.position = "none")+
+  geom_hline(yintercept = 0.5,linetype="dotted",linewidth=1.25) +theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches"))+ ggtitle("MDS/MPN") 
+
+# + annotate(geom="text", x = 365,y = 0.25, label="Log-rank\nP = 0.078",fontface="italic",hjust=0,size=4.5)
+
+HR.mds.mpn = summary(coxph(Surv(Days_FU_OS,FU_Death)~Treatment_arm,data=df[df$Diagnosis_simple_combo=="CMML_MDS_MPN",]))$conf.int
+
+HR.mds.mpn.anno = paste0("HR = ",round(HR.mds.mpn[1],2), "\n95% CI ",round(HR.mds.mpn[3],2),", ",round(HR.mds.mpn[4],2))
+p2$plot = p2$plot + annotate(geom="text", x = 365,y = 0.25, label=HR.mds.mpn.anno,hjust=0,size=4.5)
+
+
+p1$table = p1$table +theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+p2$table = p2$table +theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+p3$table = p3$table +theme_prism()+ theme(axis.line = element_blank())+scale_x_continuous(limits=c(0,365.25*6), breaks = seq(0,5*365.25,365.25),labels = seq(0,60,12),expand=c(0,0))+coord_cartesian(clip="off")+theme(text = element_text(face="bold",family=""),axis.text.y = element_text(hjust=1,colour = c(pal_nejm()(4)[c(3)],"black"),margin= margin(0, 7, 0, 0) ),axis.ticks.y = element_blank(),plot.margin = unit(c(0, 0, 0, 0), "inches"))+xlab("") + ggtitle("") +ylab("Number at risk")
+
+p1$plot + p2$plot + p3$plot +
+  p1$table + p2$table + p3$table + plot_layout(ncol=3,heights=c(1,0.4))
+
+# ggsave('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/diansotic_subgroups.pdf', width=18, height=7.75)
+
+```
+
+## Competing risk regression (progression)
+
+For this analysis death is a competing risk of high-risk progression. We are a bit limited in sample size and events; there are only 14 progression events. Power to detect any differences in progression is quite low and we will have difficulty adjusting for any covariates here. We see corroboration with out overall survival findings that death (the dotted lines) are significantly different, however we do not have enough evidence to determine if progression also differs (p = 0.22).
+
+```{r, fig.width=10,fig.height=6}
+
+# survfit(Surv(12*HR_Days_FU_progression/365.25, as.numeric(HR_FU_Progression))~Treatment_arm,df[df$HR_FU_Progression == 1,])
+
+df$crevent = ifelse(df$HR_FU_Progression == 1,1,ifelse(df$FU_Death==1,2,0))
+
+df$crevent=factor(df$crevent,levels=c(0,1,2),labels=c("Censor","Higher-risk progression","Death"))
+df$Months = 12*df$HR_Days_FU_progression/365.25
+CI.tx = tidycmprsk::cuminc(Surv( Months ,crevent)~Treatment_arm,data=df)
+
+tidycmprsk::crr(Surv( Months ,crevent)~VitaminC,data=df)
+
+# CI.tx
+# 
+# CI.tx$tidy
+
+# CI.tx = cuminc(ftime = df$HR_Days_FU_progression , fstatus = df$crevent,group = df$Treatment_arm)
+# 
+# plot(CI.tx,col = rep(c("black",pal_nejm()(1)),2), curvlab = c("HR Progression, Placebo","HR Progression, Vit C", "Death, Placebo", "Death, Vit C"), xlab = "Days", lty=c(1,1,2,2))
+
+# CI.tx$Tests
+
+ggsurvfit::ggcuminc(CI.tx,outcome=c("Higher-risk progression","Death"),linewidth=1)+theme_prism()+scale_color_manual(values=c("black",pal_nejm()(4)[3]))+scale_y_continuous(limits=c(0,0.4))+
+  annotate(geom="text",x = 71,y = max(CI.tx$tidy$estimate[CI.tx$tidy$strata == "Placebo" & CI.tx$tidy$outcome == "Death"],na.rm=T),label="Death, Placebo",hjust=0,size=4.5)+
+  annotate(geom="text",size=4.5,x = 71,y = max(CI.tx$tidy$estimate[CI.tx$tidy$strata == "Placebo" & CI.tx$tidy$outcome == "Higher-risk progression"],na.rm=T)+0.005,label="Higher-risk progression, Placebo",hjust=0)+
+  coord_cartesian(clip = "off")+theme(legend.position = "none",plot.margin = unit(c(0, 1, 0, 0), "inches")) +
+  annotate(geom="text",size=4.5,x = 71,y = max(CI.tx$tidy$estimate[CI.tx$tidy$strata == "Vitamin C" & CI.tx$tidy$outcome == "Death"],na.rm=T)-0.005,label="Death, Vitamin C",hjust=0,color=pal_nejm()(4)[3])+
+  annotate(geom="text",size=4.5,x = 71,y = max(CI.tx$tidy$estimate[CI.tx$tidy$strata == "Vitamin C" & CI.tx$tidy$outcome == "Higher-risk progression"],na.rm=T),label="Higher-risk progression, Vitamin C",hjust=0,color=pal_nejm()(4)[3]) + ggtitle("Competing risks analysis")+
+  xlab("Months from randomization")+theme(legend.position = "none",plot.margin = unit(c(0, 2.5, 0, 0), "inches"))
+
+ggsave('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/competing_risk_progression.pdf', width=10, height=6)
+
+
+```
+
+
+## Global Methylation 
+
+**Figure XX. Global methylation changes over time by treatment arm** A) 5mC/dG and B) 5hmC/5mC levels for each patient at inclusion and end-of-therapy (EOT) and the change in these measures between inclusion and EOT. Data were analyzed using robust linear mixed-effects models with a random intercept for each patient and an interaction between treatment and timepoint to assess if measures changed differently over time. Models also included a covariate for batch.
+
+
+```{r, fig.width=8, fig.height=9}
+
+colnames(df.sp)[7:8] = c("Timepoint","Vitamin_C")
+df.hm1 = as.data.frame( read_excel(unzip("/varidata/research/projects/jones/computerome/Vitc_Data.zip","EVI2_data_consolidated030524.xlsx"),sheet=2))
+df.hm1 = df.hm1[,c(1,7,8,9:11)]
+colnames(df.hm1) = c("ID", "mC","hmC","hmC/mC","mC/dG","hmC/dG")
+df.hm2 = as.data.frame( read_excel("/varidata/research/projects/jones/computerome/Vitc_Data/MC00600_QuantCombined 112524 ST edits.xlsx",sheet=6,skip=1))
+df.hm2 = df.hm2[,c(1,5,7,9:11)]
+colnames(df.hm2) = c("ID", "hmC","mC","hmC/dG","mC/dG","hmC/mC")
+df.hm1$Batch=1
+df.hm2$Batch = 2
+df.hm = rbind(df.hm1,df.hm2)
+
+##These were mistakenly changed to 5 as EOT, they are not and we should model these as different times
+df.hm$ID[match(c("1-5","12-5","33-5","25-5","44-5","78-5"),df.hm$ID )] = 
+ c("1-2","12-2","33-2","25-2","44-2","78-4")
+
+df.hm$Time = as.numeric(gsub(".*-","",df.hm$ID))
+df.hm$Time = factor(df.hm$Time,levels=seq(1:5),labels=c(0,3,6,9,12))
+df.hm$ID = gsub("-.*","",df.hm$ID)
+df.sp$ID = gsub("-","",df.sp$ID)
+df.merge = left_join(df.hm,df.sp,by= c("ID","Time"))
+colnames(df.merge) = make.names(colnames(df.merge))
+df.merge= df.merge[!is.na(df.merge$Time),]
+df.merge$Timepoint  = ifelse(df.merge$Time == 0, "Inclusion","EOT")
+
+# fit = lmer(as.numeric(mC.dG)  ~ Treatment_arm*Time + Batch + (1|ID),data=df.merge )
+# p = round(joint_tests(fit)$p.value[3],2)
+
+fit = rlmer(as.numeric(mC.dG)  ~ Treatment_arm*Timepoint + Batch + (1|ID),data=df.merge )
+p = round(joint_tests(fit)$p.value[3],2)
+df.merge$Timepoint = factor(df.merge$Timepoint,levels=c("Inclusion","EOT"))
+p1.tp = ggplot(df.merge,aes(x = Time,y=as.numeric(mC.dG),color=Treatment_arm)) + geom_point(alpha=0.25) +
+  geom_line(aes(group=ID),alpha=0.25) + facet_wrap(~Treatment_arm) +
+  theme_prism(axis_text_angle = 45) + scale_color_manual(values=c("black","#E18727FF"))+theme(legend.position="none")+xlab("")+ylab('5-mC/dG') 
+
+# p1.tp
+
+p1.mc = ggplot(df.merge,aes(x = Timepoint,y=as.numeric(mC.dG),color=Treatment_arm)) + geom_point(alpha=0.25) +
+  geom_line(aes(group=ID),alpha=0.25) + facet_wrap(~Treatment_arm) +
+  theme_prism(axis_text_angle = 45) + scale_color_manual(values=c("black","#E18727FF"))+theme(legend.position="none")+xlab("")+ylab('5-mC/dG') 
+
+
+EOT = subset(df.merge[df.merge$Timepoint == "EOT",], select=c(mC.dG,Treatment_arm,ID))
+Base = subset(df.merge[df.merge$Timepoint == "Inclusion",], select=c(mC.dG,Treatment_arm,ID))
+colnames(EOT)[1] = "EOT.mC.dG"
+colnames(Base)[1] = "Base.mC.dG"
+
+mc.dg.wide = left_join(EOT,Base)
+
+p2.mc = ggplot(mc.dg.wide,aes(x = Treatment_arm, y = as.numeric(EOT.mC.dG) - as.numeric(Base.mC.dG ),color=Treatment_arm)) +
+  geom_quasirandom() + geom_boxplot(fill=NA,outliers=F) +
+  stat_smooth(method="rlm") +
+  xlab("") +
+  ylab("Delta 5-mC/dG\n(Post - Pre)")+
+  theme_prism(axis_text_angle = 45)+theme(legend.title = element_blank())+stat_cor()+
+  scale_color_manual(values=c("black","#E18727FF")) + 
+  annotate(geom = "line",x = c(1,2), y= c(0.0075,0.0075) ,color="black") +
+  annotate(geom="text",x = 1.5,y = 0.009,label=paste0("P = ",p),fontface="italic")+theme(legend.position = "none")
+
+pmc = (p1.mc+p2.mc+plot_layout(widths = c(1,0.6),ncol=2))
+
+
+fit = rlmer(as.numeric(hmC.mC)  ~ Treatment_arm*Timepoint + Batch + (1|ID),data=df.merge )
+p = round(joint_tests(fit)$p.value[3],2)
+
+p1.tp.hmC.mC = ggplot(df.merge,aes(x = Time,y=as.numeric(hmC.mC),color=Treatment_arm)) + geom_point(alpha=0.25) +
+  geom_line(aes(group=ID),alpha=0.25) + facet_wrap(~Treatment_arm) +
+  theme_prism(axis_text_angle = 45) + scale_color_manual(values=c("black","#E18727FF"))+theme(legend.position="none")+xlab("")+ylab('5-mC/dG') 
+
+# p1.tp.hmC.mC
+
+p1.hmC.mC = ggplot(df.merge,aes(x = Timepoint,y=as.numeric(hmC.mC),color=Treatment_arm)) + geom_point(alpha=0.25) +
+  geom_line(aes(group=ID),alpha=0.25) + facet_wrap(~Treatment_arm) +
+  theme_prism(axis_text_angle = 45) + scale_color_manual(values=c("black","#E18727FF"))+theme(legend.position="none")+xlab("")+ylab('5hmC/5mC') 
+
+
+EOT = subset(df.merge[df.merge$Timepoint == "EOT",], select=c(hmC.mC,Treatment_arm,ID))
+Base = subset(df.merge[df.merge$Timepoint == "Inclusion",], select=c(hmC.mC,Treatment_arm,ID))
+colnames(EOT)[1] = "EOT.hmC.mC"
+colnames(Base)[1] = "Base.hmC.mC"
+
+hmC.mC.wide = left_join(EOT,Base)
+
+p2.hmC.mC = ggplot(hmC.mC.wide,aes(x = Treatment_arm, y = as.numeric(EOT.hmC.mC) - as.numeric(Base.hmC.mC ),color=Treatment_arm)) +
+  geom_quasirandom() + geom_boxplot(fill=NA,outliers=F) +
+  stat_smooth(method="rlm") +
+  xlab("") +
+  ylab("Delta 5hmC/5mC\n(Post - Pre)")+
+  theme_prism(axis_text_angle = 45)+theme(legend.title = element_blank())+stat_cor()+
+  scale_color_manual(values=c("black","#E18727FF")) + 
+  annotate(geom = "line",x = c(1,2), y= c(0.0075,0.0075) ,color="black") +
+  annotate(geom="text",x = 1.5,y = 0.009,label=paste0("P = ",p),fontface="italic")+theme(legend.position = "none")
+
+phmC.mC = (p1.hmC.mC+p2.hmC.mC+plot_layout(widths = c(1,0.6),ncol=2))
+
+
+cowplot::plot_grid(pmc ,phmC.mC,
+                     labels=c("A","B"),ncol=1)
+
+
+# cairo_pdf('~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/global_methylation_all.pdf',
+#           width=8, height=9)
+#   cowplot::plot_grid(pmc ,
+#                      p.ratio,
+#                      labels=c("A","B"),ncol=1)
+# 
+# dev.off()
+
+```
+
+
+## Cytokines {.tabset}
+### Primary Analysis, all patients {.tabset}
+
+#### Suppl all cytokines
+
+**Supplemental Figure XX. log2 fold-change in cytokine measures for all individuals.** Data were analyzed using robust linear mixed-effects models with a random intercept for each patient and an interaction between treatment and timepoint to assess if measures changed differently over time. Models were also adjusted for age, gender, baseline hemoglobin, and whether or not patients had CCUS at inclusion. 
+
+
+```{r, fig.height=11,fig.width=11}
+
+cyto = read.table(unzip("/varidata/research/projects/jones/computerome/Vitc_Data.zip","20240417_EVI_MSD.tsv"),sep="\t",header=T)
+
+cyto$ID = gsub("-.*","",cyto$Source_Tube_ID)
+cyto$ID[which(grepl("USC",fixed=T,cyto$Source_Tube_ID))] = substr(cyto$Source_Tube_ID[which(grepl("USC",fixed=T,cyto$Source_Tube_ID))],1,6)
+cyto$ID[which(grepl("AAL",fixed=T,cyto$Source_Tube_ID))] = substr(cyto$Source_Tube_ID[which(grepl("AAL",fixed=T,cyto$Source_Tube_ID))],1,6)
+
+cyto$Time = as.numeric(substr(gsub(" .*","",gsub(".*-","",cyto$Source_Tube_ID)),1,1))
+cyto$Timepoint = ifelse(cyto$Time ==1,"Inclusion","EOT")
+cyto = cyto[order(cyto$Time,cyto$ID),]
+cyto.m = merge(cyto,subset(df,select=c(ID, Treatment_arm,Age_inclusion_years, Sex,CCUS,Hb1)))
+
+agg = aggregate(calc_conc_imputed~Timepoint +ID+assay+Treatment_arm,cyto.m,function(x) {mean(x,na.rm=T)})
+agg.sub = subset(agg,select=c(ID,calc_conc_imputed,assay,Treatment_arm,Timepoint))
+
+cyto.wide = reshape2::dcast(agg.sub, ID + Timepoint +Treatment_arm  ~ assay,value.var="calc_conc_imputed")
+
+grps=NULL
+time=NULL
+diff=NULL
+
+for(i in unique(cyto.m$assay)){
+  fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm + Age_inclusion_years+ Sex+CCUS +(1|ID),data=cyto.m[cyto.m$assay==i,])
+  
+  grps = rbind(grps,data.frame(assay = i,summary(emmeans(fit,pairwise~Treatment_arm|Timepoint)$contrasts)))
+  time = rbind(time,data.frame(assay = i,summary(emmeans(fit,pairwise~Timepoint|Treatment_arm)$contrasts)))
+
+  diff = rbind(diff,data.frame(assay = i,p = emmeans::joint_tests(fit)[6,6],est = -1*summary(fit)$coeff[7,1]))
+
+}
+
+grps$FDR = p.adjust(grps$p.value,method="BH")
+time$FDR = p.adjust(time$p.value,method="BH")
+time$FoldChange = 2^time$estimate
+knitr::kable(time[time$FDR<0.05,],caption = "Significant changes over time by treatment")
+
+diff$FDR = p.adjust(diff$p,method="BH")
+
+knitr::kable(diff[diff$FDR < 0.05,],caption= "Cytokines that changed differently over time for Placebo versus Vitamin C")
+
+sig.t = time[time$FDR<0.05,]
+sig.t$Label = case_when(sig.t$FDR<0.001 ~"***",
+                        sig.t$FDR<0.01 ~"**",
+                        TRUE~"*")
+
+sig.t$y = rep(0)
+for(i in 1:nrow(sig.t)){
+  sig.t$y[i] = log2(max(agg$calc_conc_imputed[agg$assay ==sig.t$assay[i]],na.rm=T))
+}
+
+agg$Timepoint = factor(agg$Timepoint,levels=c("Inclusion","EOT"))
+agg.pr = agg[agg$Timepoint=="Inclusion",]
+agg.post = subset(agg[agg$Timepoint=="EOT",],select=c(calc_conc_imputed, assay,ID))
+agg.w = left_join(agg.pr,agg.post,by=c("ID","assay"))
+agg.w$delta = log2(agg.w$calc_conc_imputed.y) - log2(agg.w$calc_conc_imputed.x)
+
+sig.d = diff[diff$FDR<0.05,]
+sig.d$Label = ifelse(sig.d$FDR<0.001 ,"FDR P < 0.001",paste0("FDR P = ",round(sig.d$FDR,3)))
+
+sig.d$y = rep(0)
+for(i in 1:nrow(sig.d)){
+  sig.d$y[i] = max(agg.w$delta[agg.w$assay ==sig.d$assay[i]],na.rm=T)*1.275
+}
+
+sig.d$y = 5
+
+agg.w$assay = gsub("_"," ",agg.w$assay)
+time$assay = gsub("_"," ",time$assay)
+
+ggplot(agg.w,aes(x = Treatment_arm, y = delta,color= Treatment_arm)) +
+  facet_wrap(~assay,scales="free",ncol=5)+geom_hline(yintercept = 0,linewidth=1,color="grey",linetype="dashed") +
+  theme_classic(15) + geom_quasirandom()+ geom_boxplot(fill=NA,outlier.size=-1)+ stat_smooth(method="lm",linewidth=1.25)+scale_color_manual(values=c("black","#E18727FF"))+theme(strip.background = element_blank())+ylab(expression(~ log2(frac("Cytokine concentration post","Cytokine concentration pre")))) +geom_text(data=sig.d,aes(x=1.5,y=y,label=Label),color="black",size=4,face="italic")+geom_segment(data=sig.d,aes(x = 1,xend=2,y =0.8*y,yend=0.8*y ),color="black")+theme(legend.title = element_blank(),legend.position = "none")+xlab("")
+
+
+# ggsave("~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/suppl_all_cytokines.pdf",height=11,width=11,device=cairo_pdf)
+
+
+```
+
+#### Cytokine figure
+
+**Supplemental Figure XX. log2 fold-change in cytokine measures that changed significantly.** Data were analyzed using robust linear mixed-effects models with a random intercept for each patient and an interaction between treatment and timepoint to assess if measures changed differently over time. Models were also adjusted for age, gender, baseline hemoglobin, and whether or not patients had CCUS at inclusion. Larger points indicate the mean log2(fold-change) with 95% CI error bars. Scales were limited to +/-1.5 log2(fold-change) to better characterize dispersion, all data points are shown in supplemental figure XX. P-values were false discovery rate adjusted using Benjamini-Hochberg. 
+
+
+```{r,fig.height=4.5,fig.width=12}
+# 
+time = time[time$assay %in% diff$assay[diff$FDR<0.05 ],]
+agg.w = agg.w[agg.w$assay %in% diff$assay[diff$FDR<0.05 ],]
+ sig.d$Treatment_arm = "Placebo"
+
+time$assay = factor(time$assay,levels=c("IL-6", "IL-10", "RANTES", "IP-10", "G-CSF", "M-CSF"))
+agg.w$assay = factor(agg.w$assay,levels=c("IL-6", "IL-10", "RANTES", "IP-10", "G-CSF", "M-CSF"))
+time$estimate = time$estimate*-1
+
+ggplot(time,aes(x = Treatment_arm, y = estimate,fill=Treatment_arm,color=Treatment_arm)) + geom_point(size=2.5)+ facet_wrap(~assay,scales="free_x",ncol=6)+geom_hline(yintercept = 0,linewidth=1,color="grey",linetype="dashed",linewidth=1.25) +
+  theme_classic(15) + scale_fill_manual(values=c("black","#E18727FF"))+
+  scale_color_manual(values=c("black","#E18727FF")) +theme(strip.background = element_blank(),plot.caption =  element_text(hjust = 0, margin = margin(0, 0, 0, 0, "pt")))+ylab("log2(FC)")+geom_text(data=sig.d,aes(x=1.5,y=1.5,label=Label,group=1),fill="black",size=4,fontface="italic")+geom_segment(data=sig.d,aes(x = 1,xend=2,y =0.925*1.5,yend=0.925*1.5 ,group=1),color="black")+theme(legend.title = element_blank(),legend.position = "none")+xlab("") + geom_errorbar(aes(ymin = estimate - 1.96*SE,ymax= estimate + 1.96*SE),width=0.25,linewidth=0.75) +geom_quasirandom(data=agg.w,aes(x = Treatment_arm, y = delta,color=Treatment_arm),alpha=0.4) + coord_cartesian(ylim=c(-1.5,1.5))
+
+# ggsave("~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/sig_cytos.pdf",height=4.5,width=12)
+
+```
+
+#### Subgroup Heatmap
+
+**Supplemental figures XX and XY. Cytokines that changed differently over time by treatment arm.** A) Heatmap indicating if the *timepoint x treatment* interaction was significant after multiple testing adjustments in each of the subgroups. For reference the primary cytokine results are shown in the first column. B) Volcano plots by cytokine showing concordance of FDR and FC values. Data were analyzed using robust linear mixed-effects models with a random intercept for each patient and an interaction between treatment and timepoint to assess if measures changed differently over time. Models were also adjusted for age, gender, baseline hemoglobin, and whether or not patients had CCUS at inclusion. P-values were false discovery rate adjusted using Benjamini-Hochberg across all subgroups.
+
+
+```{r, fig.height=11,fig.width=11}
+
+# par(mfrow=c(1,1))
+# cyto.mm = merge(cyto.m,df,by=c("ID"))
+# cyto.sub=NULL
+# 
+# cyto.mm$Timepoint = factor(cyto.mm$Timepoint,levels=c("Inclusion","EOT"))
+# 
+# for(i in unique(cyto.m$assay)){
+#   fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm.x +(1|ID),data=cyto.mm[cyto.mm$assay==i & cyto.mm$TET2 == "TET2neg",])
+#   cyto.sub = rbind(cyto.sub,data.frame(Subgroup = "TET2 neg",assay = i,p = emmeans::joint_tests(fit)[3,6],est=-1*summary(fit)$coeff[4,1]))
+# }
+# 
+# for(i in unique(cyto.m$assay)){
+#   fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm.x +(1|ID),data=cyto.mm[cyto.mm$assay==i & cyto.mm$TET2 == "TET2Mut",])
+#   cyto.sub = rbind(cyto.sub,data.frame(Subgroup = "TET2Mut",assay = i,p = emmeans::joint_tests(fit)[3,6],est=-1*summary(fit)$coeff[4,1]))
+# }
+# 
+# for(i in unique(cyto.m$assay)){
+#   fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm.x +(1|ID),data=cyto.mm[cyto.mm$assay==i & cyto.mm$med_vitc == "above",])
+#   cyto.sub = rbind(cyto.sub,data.frame(Subgroup = "Above Med Vit C",assay = i,p = emmeans::joint_tests(fit)[3,6],est=-1*summary(fit)$coeff[4,1]))
+# }
+# 
+# for(i in unique(cyto.m$assay)){
+#   fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm.x +(1|ID),data=cyto.mm[cyto.mm$assay==i & cyto.mm$med_vitc == "below",])
+#   cyto.sub = rbind(cyto.sub,data.frame(Subgroup = "below Med Vit C",assay = i,p = emmeans::joint_tests(fit)[3,6],est=-1*summary(fit)$coeff[4,1]))
+# }
+# 
+# for(i in unique(cyto.m$assay)){
+#   fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm.x +(1|ID),data=cyto.mm[cyto.mm$assay==i & cyto.mm$vitc_group == "Deficient",])
+#   cyto.sub = rbind(cyto.sub,data.frame(Subgroup = "Deficient",assay = i,p = emmeans::joint_tests(fit)[3,6],est=-1*summary(fit)$coeff[4,1]))
+# }
+# 
+# for(i in unique(cyto.m$assay)){
+#   fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm.x +(1|ID),data=cyto.mm[cyto.mm$assay==i & cyto.mm$vitc_group == "Adequate",])
+#   cyto.sub = rbind(cyto.sub,data.frame(Subgroup = "Adequate",assay = i,p = emmeans::joint_tests(fit)[3,6],est=-1*summary(fit)$coeff[4,1]))
+# }
+# 
+# for(i in unique(cyto.m$assay)){
+#   fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm.x +(1|ID),data=cyto.mm[cyto.mm$assay==i & cyto.mm$vitc_group == "Inadequate",])
+#   cyto.sub = rbind(cyto.sub,data.frame(Subgroup = "Inadequate",assay = i,p = emmeans::joint_tests(fit)[3,6],est=-1*summary(fit)$coeff[4,1]))
+# }
+# 
+# for(i in unique(cyto.m$assay)){
+#   fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm.x +(1|ID),data=cyto.mm[cyto.mm$assay==i & cyto.mm$Diagnosis_simple_combo == "CCUS",])
+#   cyto.sub = rbind(cyto.sub,data.frame(Subgroup = "CCUS",assay = i,p = emmeans::joint_tests(fit)[3,6],est=-1*summary(fit)$coeff[4,1]))
+# }
+# 
+# for(i in unique(cyto.m$assay)){
+#   fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm.x +(1|ID),data=cyto.mm[cyto.mm$assay==i & cyto.mm$Diagnosis_simple_combo == "MDS",])
+#   cyto.sub = rbind(cyto.sub,data.frame(Subgroup = "MDS",assay = i,p = emmeans::joint_tests(fit)[3,6],est=-1*summary(fit)$coeff[4,1]))
+# }
+# 
+# for(i in unique(cyto.m$assay)){
+#   fit = rlmer(log2(calc_conc_imputed) ~ Timepoint*Treatment_arm.x +(1|ID),data=cyto.mm[cyto.mm$assay==i & cyto.mm$Diagnosis_simple_combo == "CMML_MDS_MPN",])
+#   cyto.sub = rbind(cyto.sub,data.frame(Subgroup = "CMML_MDS_MPN",assay = i,p = emmeans::joint_tests(fit)[3,6],est=-1*summary(fit)$coeff[4,1]))
+# }
+# 
+# cyto.sub$FDR = p.adjust(cyto.sub$p,method="BH")
+# 
+# write.csv(cyto.sub, file="~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/significant_cytokine_subgroups.csv",row.names=F)
+
+cyto.sub = read.csv(file="~/bbc-secondary/research/JONP_20240430_vitc_trial_VBCS/significant_cytokine_subgroups.csv",header=T)
+
+diff$Subgroup = "All"
+
+cyto.sub = rbind(cyto.sub,diff)
+           
+
+cyto.sub$Significant = case_when(cyto.sub$FDR < 0.05 & cyto.sub$est<0~"Significantly higher in vitamin C patients",
+                          cyto.sub$FDR < 0.05 & cyto.sub$est>0~"Significantly lower in vitamin C patients",
+                          TRUE ~ "Not Significant")
+
+cyto.sub$Subgroup = factor(cyto.sub$Subgroup,levels=c("All",
+                                                      "TET2 neg",
+                                                      "TET2Mut",
+                                                      "below Med Vit C",
+                                                      "Above Med Vit C",
+                                                      "Deficient",
+                                                      "Inadequate",
+                                                      "Adequate",
+                                                      "CCUS",
+                                                      "MDS",
+                                                      "CMML_MDS_MPN"),
+                                             labels=c("All patients",
+                                                    "No TET2 or IDH1/2 mutations",
+                                                    "TET2 of IDH1/2 mutation",
+                                                    "Below median vit C",
+                                                    "Above median vit C",
+                                                    "Vit C deficient",
+                                                      "Vit C inadequate",
+                                                      "Vit C adequate",
+                                                    "CCUS",
+                                                    "MDS",
+                                                    "MDS/MPN"),
+)
+
+
+ggplot(cyto.sub, aes(x = Subgroup, y = assay, fill=Significant  ) ) + 
+         geom_tile() + 
+         theme_prism(axis_text_angle=45) +
+         scale_fill_manual(values=c("white","blue","red")) +
+          xlab("") +ylab("")
+
+
+ggplot(cyto.sub, aes(x = est, y = -log10(FDR),color=Subgroup )) + 
+        geom_point() + 
+        theme_prism(axis_text_angle=45) +
+        scale_color_viridis_d(option="turbo")+    
+        xlab("log2(FC)") +
+  facet_wrap(~assay,scales = "free") +
+  scale_x_continuous(limits=c(-1,1)) + theme(legend.position = "bottom")+ geom_hline(aes(yintercept = 1.30,linetype = "FDR < 0.05"),color="red",alpha=0.5) + 
+  scale_linetype_manual(values=c(2)) +
+  scale_y_continuous(limits=c(0,5))
+
+
+# ggplot(cyto.sub, aes(x = est, y = -log10(FDR),color=assay )) +
+#         geom_point() +
+#         theme_prism(axis_text_angle=45) +
+#         scale_color_viridis_d(option="turbo")+
+#         xlab("log2(FC)") +
+#   scale_x_continuous(limits=c(-1,1)) + theme(legend.position = "bottom") +stat_smooth(method="lm",se=F)
+
+
+
+```
+
+
+
+#### WCNA
+
+Cannot get good scale-free topology WGCNA is a no go. Surprisingly little correlation among the cyotkines
+
+
+```{r}
+library(corrplot)
+library(WGCNA)
+M = cor(cyto.wide[,4:ncol(cyto.wide)],use='pairwise.complete.obs')
+corrplot(M, method = 'square', order = 'FPC', type = 'upper', diag = FALSE)
+
+
+datExpr = cyto.wide[,4:ncol(cyto.wide)]
+SubCytoNames=colnames(cyto.wide[,4:ncol(cyto.wide)])
+
+
+powers = c(c(1:10), seq(from = 12, to=20, by=2));
+
+sft=pickSoftThreshold(datExpr,dataIsExpr = TRUE,powerVector = powers,corFnc = cor,corOptions = list(use = 'p'),networkType = "signed hybrid")
+
+# Plot the results
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit, signed hybrid hybrid R^2",type="n", main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],labels=powers,cex=cex1,col="red");
+
+# Red line corresponds to using an R^2 cut-off
+abline(h=0.80,col="red")
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+
+```
+
+
+#### PCA
+
+Majority of variance is neither time nor treatment
+
+```{r}
+
+cyto.wide.c = na.omit(cyto.wide)
+pc.a = prcomp(log2(cyto.wide.c[,4:ncol(cyto.wide.c)]+1),scale=T)
+pc.df = as.data.frame(pc.a$x)
+pc.df$Treatment = cyto.wide.c$Treatment_arm
+pc.df$Timepoint = cyto.wide.c$Timepoint
+pc.df$ID = cyto.wide.c$ID
+
+ggplot(pc.df,aes(x = PC1,y=PC2,color=Treatment,shape=Timepoint)) + geom_point() +
+  theme_prism() + scale_color_manual(values =c("black",pal_nejm()(4)[3])) + stat_ellipse()
+
+ggplot(pc.df,aes(x = PC3,y=PC4,color=Treatment,shape=Timepoint)) + geom_point() +
+  theme_prism() + scale_color_manual(values =c("black",pal_nejm()(4)[3])) + stat_ellipse()
+
+ggplot(pc.df,aes(x = PC5,y=PC6,color=Treatment,shape=Timepoint)) + geom_point() +
+  theme_prism() + scale_color_manual(values =c("black",pal_nejm()(4)[3])) + stat_ellipse()
+
+
+
+```
+
