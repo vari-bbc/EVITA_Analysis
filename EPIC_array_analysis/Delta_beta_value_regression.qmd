@@ -1,0 +1,187 @@
+---
+title: Delta DNA methylation β value regression analysis
+editor_options: 
+  chunk_output_type: console
+---
+
+This script performs probe-wise linear regression comparing changes in DNA methylation (delta β values) from baseline to the end of treatment between the vitamin C and placebo groups.
+
+<hr>
+
+### Required R packages
+```{r}
+#| label: Required packages
+#| warning: false
+#| message: false
+.libPaths("/packages/")
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  fs,
+  data.table,
+  Matrix,
+  matrixStats,
+  stringr,
+  purrr,
+  doFuture,
+  qs
+)
+```
+
+### Project setup
+```{r}
+#| label: Analysis settings
+#| warning: false
+#| message: false
+project_dir <- path("~/EVITA_EPIC_methylation_analysis")
+r_data_dir <- path(project_dir, "r_data")
+# parallel processing settings
+n_workers <- parallelly::availableCores() - 2
+future::plan(multisession, workers = n_workers)
+options(future.globals.maxSize = 10000 * 1024^2)
+# Set random seed for reproducibility
+set.seed(1022)
+```
+
+### DNA methylation data loading
+- Delta β value matrix (End of treatment - Baseline) and sample metadata
+```{r}
+#| label: Load data
+fname <- "EVITA_DNA_methylation_EPIC_delta_beta_values"
+dt <- readRDS(path(r_data_dir, fname, ext = "rds"))
+fname <- "EVITA_DNA_methylation_EPIC_sample_table"
+sample_table <- readRDS(path(r_data_dir, fname, ext = "rds"))
+sample_table <- sample_table[Timepoint != "Baseline"]
+stopifnot(identical(colnames(dt)[-1], sample_table[, PatientID]))
+```
+
+### Sample selection (Mutant or wildtype)
+Select either wild-type or mutant samples for the regression analysis.
+- Select wild-type samples
+```{r}
+#| label: Sample selection wildtype
+group <- "wildtype"
+sample_table[TET2 == 0 & IDH == 0][, .N, .(TET2, IDH)]
+idat_ids <- sample_table[TET2 == 0 & IDH == 0, IDAT]
+```
+- Select mutant samples
+```{r}
+#| label: Sample selection mutant
+#group <- "mutant"
+#sample_table[TET2 == 1 | IDH == 1][, .N, .(TET2, IDH)]
+#idat_ids <- sample_table[TET2 == 1 | IDH == 1, IDAT]
+```
+
+### Probe filtering based on missing data
+```{r}
+#| label: Probe filtering based on missing data
+fname <- "EVITA_DNA_methylation_EPIC_probe_metadata"
+probe_meta <- readRDS(path(r_data_dir, fname, ext = "rds"))
+probe_ids <- probe_meta[percent_missing_vals < 20, ProbeID]
+dt <- dt[ProbeID %in% probe_ids]
+```
+
+### Regression data matrix
+```{r}
+#| label: Regression data matrix
+sample_table <- sample_table[IDAT %in% idat_ids]
+sample_table[, .N, .(TET2, IDH)]
+patient_ids <- sample_table[, PatientID]
+dt <- dt[, .SD, .SDcols = c("ProbeID", patient_ids)]
+df <- as.matrix(dt, rownames = "ProbeID")
+identical(sample_table[, PatientID], colnames(df))
+probe_ids <- rownames(df)
+length(probe_ids)
+```
+
+### Treatment labels
+- Generate randomised treatment labels
+```{r}
+#| label: Treatment labels
+# Original treatment label
+sample_table[, .N, Treatment_arm]
+original_label  <- copy(sample_table[, Treatment_arm])
+
+# Treatment label scrambled
+n_permutations <- 1000
+scrambled_labels <- matrix(nrow = length(original_label), ncol = n_permutations)
+for (run in 1:n_permutations) {
+  scrambled_labels[, run] <- sample(original_label)
+}
+dt_scrambled_labels <- as.data.table(scrambled_labels)
+setnames(dt_scrambled_labels, str_c("scramble_", 1:n_permutations))
+dt_scrambled_labels[1:5, 1:5]
+sample_table <- cbind(sample_table, dt_scrambled_labels)
+```
+
+### Define function to run probe-wise linear regression for a single treatment label
+- Return p-values and regression coefficients for vitamin C vs placebo for each probe
+```{r}
+#| label: Define function
+run_single_regression <- function(treatment_labels) {
+  reg_results <- foreach(
+    i = seq_along(probe_ids),
+    .combine = "rbind"
+  ) %dofuture% {
+    tryCatch({
+      betas <- as.numeric(df[i, ])
+      fit <- lm(betas ~ treatment_labels)
+      fit <- setDT(broom::tidy(fit))
+      data.table(
+        b_vit_c = fit[term == "treatment_labelsVitamin C", estimate],
+        pval_vit_c = fit[term == "treatment_labelsVitamin C", p.value]
+      )
+    },
+    error = function(e) {
+      # Return NA values if there's an error
+      message("Error in probe ", i, ": ", e$message)
+      data.table(
+        b_vit_c = NA_real_,
+        pval_vit_c = NA_real_
+      )
+    },
+    warning = function(w) {
+      # Log warning but continue processing
+      message("Warning in probe ", i, ": ", w$message)
+      NULL
+    })
+  }
+  reg_results <- data.table(reg_results)
+  reg_results <- cbind(ProbeID = probe_ids, reg_results)
+  return(reg_results)
+}
+```
+
+### Perform probe-wise linear regression for original and scrambled treatment labels
+```{r}
+#| label: Run regression
+# Original label
+original_results <- run_single_regression(original_label)
+original_results
+
+# Scrambled labels
+scrambled_results <- list()
+for (i in 1:n_permutations) {
+  cat(sprintf("\rProcessing permutation %d/%d", i, n_permutations))
+  cat("\n")
+  scrambled_label <- sample_table[[str_c("scramble_", i)]]
+  scrambled_results[[i]] <- run_single_regression(scrambled_label)
+}
+cat("\nCompleted all permutations\n")
+```
+
+### Save results for later use
+```{r}
+#| label: Save results
+results <- list(
+  original = original_results,
+  scrambled = scrambled_results
+)
+fname <- str_c("EVITA_delta_betas_regression_results_", group)
+qsave(results, file = path(r_data_dir, fname, ext = "qs"))
+```
+
+### R Session
+```{r}
+#| label: R Session
+sessionInfo()
+```

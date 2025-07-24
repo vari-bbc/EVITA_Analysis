@@ -1,0 +1,123 @@
+---
+title: TET2 mutation VAF distribution
+editor_options: 
+  chunk_output_type: console
+---
+
+This script generates a plot showing distribution of variant allele frequencies (VAFs) by number of TET2 mutations per patient.
+
+<hr>
+
+### Load required packages
+```{r}
+#| label: packages
+#| warning: false
+#| message: false
+.libPaths("/packages/")
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  tidyverse,
+  data.table,
+  fs,
+  ggforce
+)
+# Set random seed for reproducibility
+set.seed(1022)
+```
+
+### Project setup
+```{r}
+#| label: project setup
+#| warning: false
+#| message: false
+project_dir <- path("~/EVITA_EPIC_methylation_analysis")
+r_data_dir <- path(project_dir, "r_data")
+```
+
+### Curated filtered somatic variants data
+```{r}
+#| label: Somatic variant allele frequencies data
+fname <- "EVITA_curated_variants_EPIC_analysis"
+vaf <- readRDS(path(r_data_dir, fname, ext = "rds"))
+#vaf <- vaf[EPIC_Data == TRUE]
+
+# Subset to TET2 mutations
+vaf <- vaf[Hugo_Symbol == "TET2"]
+
+# Count number of TET2 mutations per sample
+tbl <- vaf[, .N, Patient_ID_Timepoint][order(-N)]
+
+# Samples with one TET2 mutation
+samples_1mut <- tbl[N == 1, Patient_ID_Timepoint]
+
+# Samples with two TET2 mutations
+samples_2mut <- tbl[N == 2, Patient_ID_Timepoint]
+
+# Samples with three or more TET2 mutations
+samples_3mut <- tbl[N > 2, Patient_ID_Timepoint]
+
+# Add TET2 mutation category column
+vaf[, tet2_mut := "one_mut"]
+vaf[Patient_ID_Timepoint %in% samples_2mut, tet2_mut := "two_mut"]
+vaf[Patient_ID_Timepoint %in% samples_3mut, tet2_mut := "three_or_more_mut"]
+mut_order <- c("one_mut", "two_mut", "three_or_more_mut")
+vaf[, mut := factor(tet2_mut, levels = mut_order)]
+vaf[, .N, mut]
+```
+
+### Plot
+```{r}
+#| label: Plot
+p <- ggplot(vaf, aes(x = mut, y = AF)) +
+  geom_sina(aes(color = mut),
+            size = 0.7,
+            alpha = 0.4,
+            maxwidth = 0.8,
+            method = "density",
+            scale = TRUE) +
+  scale_color_manual(values = c(
+    "one_mut" = "#00994D",
+    "two_mut" = "#00AAFF",
+    "three_or_more_mut" = "#FF0000"
+  ),
+  name = "TET2 Mutations",
+  labels = c("One mutation", "Two mutations", "Three or more mutations")) +
+  scale_x_discrete(labels = c(
+    "One\nmutation",
+    "Two\nmutations",
+    "Three or more\nmutations"
+  )) +
+  labs(
+    x = NULL,
+    y = "Variant Allele Fraction of Each Mutation",
+    title = ""
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.title = element_text(size = 6),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.2),
+    axis.ticks = element_line(linewidth = 0.15)
+  )
+```
+```{r}
+#| label: heatmap plot
+#| fig-width: 2
+#| fig-height: 2.25
+#| fig-dpi: 300
+#| fig-format: png
+#| fig-align: left
+p
+```
+
+### R Session
+```{r}
+#| label: R Information
+sessionInfo()
+```

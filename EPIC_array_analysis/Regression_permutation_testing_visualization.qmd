@@ -1,0 +1,147 @@
+---
+title: Regression results permutation testing visualization
+editor_options: 
+  chunk_output_type: console
+---
+
+This script generates a plot visualizing the permutation testing of the number of CpGs hypomethylated in vitamin C-treated patients, stratified by the mutation status.
+
+<hr>
+
+### Load required R packages
+```{r}
+#| label: packages
+#| warning: false
+#| message: false
+.libPaths("/packages/")
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  tidyverse,
+  data.table,
+  fs,
+  ggforce,
+  patchwork,
+  qs
+)
+```
+
+### Project setup
+```{r}
+#| label: project setup
+#| warning: false
+#| message: false
+project_dir <- path("~/EVITA_EPIC_methylation_analysis")
+r_data_dir <- path(project_dir, "r_data")
+```
+
+### Number of significant probes for each permutation and original data
+- Wild-type samples
+```{r}
+#| label: Wild-type regression results
+# Scrambled data
+fname <- "EVITA_delta_betas_regression_significant_table_scrambled_wildtype"
+dt_wt_scrambled <- qread(path(r_data_dir, fname, ext = "qs"))
+# Original data
+fname <- "EVITA_delta_betas_regression_significant_table_original_wildtype"
+dt_wt_original <- qread(path(r_data_dir, fname, ext = "qs"))
+```
+- Mutant samples
+```{r}
+#| label: Mutant regression results
+# Scrambled data
+fname <- "EVITA_delta_betas_regression_significant_table_scrambled_mutant"
+dt_mut_scrambled <- qread(path(r_data_dir, fname, ext = "qs"))
+# Original data
+fname <- "EVITA_delta_betas_regression_significant_table_original_mutant"
+dt_mut_original <- qread(path(r_data_dir, fname, ext = "qs"))
+```
+
+## Plot data preparation
+```{r}
+#| label: Numbers of probes scrambled data
+scrambled_wt <- sapply(
+  dt_wt_scrambled,
+  function(x) as.numeric(
+    x[x$Name == "num_hypo", .SD, .SDcols = "all_cpgs"]
+  )
+)
+scrambled_mut <- sapply(
+  dt_mut_scrambled,
+  function(x) as.numeric(
+    x[x$Name == "num_hypo", .SD, .SDcols = "all_cpgs"]
+  )
+)
+original_wt <- dt_wt_original[Name == "num_hypo", .SD, .SDcols = "all_cpgs"]
+original_wt <- as.numeric(original_wt)
+original_mut <- dt_mut_original[Name == "num_hypo", .SD, .SDcols = "all_cpgs"]
+original_mut <- as.numeric(original_mut)
+```
+
+## Plot
+```{r}
+#| label: Plot
+# Create function for sina plot
+create_sina_plot <- function(scrambled_vals, original_val, title = "") {
+  df <- data.frame(x = rep(0, length(scrambled_vals)),
+      value = scrambled_vals)
+
+  min_non_zero <- min(df$value[df$value > 0])
+  offset <- min_non_zero / 10
+
+  ggplot(df, aes(x = x, y = value + offset)) +
+      geom_sina(size = 0.22, alpha = 0.5, colour = "#00AAFF", pch = 16) +
+      annotate("point", x = 0, y = original_val + offset,
+               size = 0.75,
+               stroke = 0.5,
+               shape = 21,
+               fill = "red",
+               color = "#800000") +
+      scale_y_log10(limits = c(1, 10000)) +
+      coord_cartesian(ylim = c(1, 10000)) +
+      labs(
+        title = title,
+        x = NULL,
+        y = NULL
+      ) +
+      theme_classic() +
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 7),
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5),
+        axis.title.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_line(linewidth = 0.2, color = "black"),
+        axis.line.x = element_line(linewidth = 0.2, color = "black"),
+        axis.line.y = element_line(linewidth = 0.2, color = "black")
+      )
+}
+
+# Create plots for wildtype and mutant
+p_wt <- create_sina_plot(
+  scrambled_wt,
+  original_wt,
+  "Wild-type"
+)
+
+p_mut <- create_sina_plot(
+  scrambled_mut,
+  original_mut,
+  "Mutant"
+)
+
+# Combine plots side by side
+p <- p_mut + p_wt
+```
+```{r}
+#| fig-width: 2
+#| fig-height: 2.25
+#| fig-dpi: 300
+#| fig-format: png
+p
+```
+
+## R Session
+```{r}
+#| label: R Information
+sessionInfo()
+```

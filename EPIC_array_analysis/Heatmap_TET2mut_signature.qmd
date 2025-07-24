@@ -1,0 +1,489 @@
+---
+title: Heatmap of TET2 mutation–associated hypermethylation signature
+editor_options: 
+  chunk_output_type: console
+---
+
+This script generates a heatmap displaying DNA methylation profiles across a previously defined TET2 mutation–associated hypermethylation signature in the EVITA cohort, and sorted normal peripheral blood cell populations from healthy donors for comparison.
+
+<hr>
+
+### Load required R packages
+```{r}
+#| label: packages
+#| warning: false
+#| message: false
+.libPaths("/packages/")
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  matrixStats,
+  tidyverse,
+  data.table,
+  fs,
+  ComplexHeatmap,
+  viridis,
+  circlize,
+  qs
+)
+```
+
+### Project setup
+```{r}
+#| label: project setup
+#| warning: false
+#| message: false
+project_dir <- path("~/EVITA_EPIC_methylation_analysis")
+r_data_dir <- path(project_dir, "r_data")
+# Source color palettes
+source(path(project_dir, "EPIC_array_analysis_color_palettes.R"))
+```
+
+### EVITA DNA methylation data
+```{r}
+#| label: DNA methylation data
+fname <- "EVITA_DNA_methylation_EPIC_beta_values"
+dt <- qread(path(r_data_dir, fname, ext = "qs"))
+fname <- "EVITA_DNA_methylation_EPIC_sample_table"
+sample_table <- readRDS(path(r_data_dir, fname, ext = "rds"))
+# Check that the IDAT IDs match
+stopifnot(identical(colnames(dt)[-1], sample_table[, IDAT]))
+```
+
+### EVITA somatic variant data processing
+- Display the highest VAF for a patient with multiple mutations in the same gene.
+```{r}
+#| label: Somatic variant data processing
+fname <- "EVITA_curated_variants_EPIC_analysis"
+vaf <- readRDS(path(r_data_dir, fname, ext = "rds"))
+vaf <- vaf[EPIC_Data == TRUE, .(Patient_ID_Timepoint, Hugo_Symbol, AF)]
+
+# TET2 mutations
+vaf_tet2 <- vaf[Hugo_Symbol == "TET2"]
+vaf_tet2 <- vaf_tet2[order(Patient_ID_Timepoint, AF, decreasing = TRUE)]
+vaf_tet2 <- vaf_tet2[!duplicated(Patient_ID_Timepoint)]
+colnames(vaf_tet2)[-1] <- str_c("TET2_", colnames(vaf_tet2)[-1])
+
+# IDH1/2 mutations
+vaf_idh1 <- vaf[Hugo_Symbol == "IDH1"]
+vaf_idh2 <- vaf[Hugo_Symbol == "IDH2"]
+vaf_idhs <- rbind(vaf_idh1, vaf_idh2)
+vaf_idhs[, Hugo_Symbol := "IDH"]
+colnames(vaf_idhs)[-1] <- str_c("IDH_", colnames(vaf_idhs)[-1])
+
+# DNMT3A mutations
+vaf_dnmt3a <- vaf[Hugo_Symbol == "DNMT3A"]
+vaf_dnmt3a <- vaf_dnmt3a[order(Patient_ID_Timepoint, AF, decreasing = TRUE)]
+vaf_dnmt3a <- vaf_dnmt3a[!duplicated(Patient_ID_Timepoint)]
+colnames(vaf_dnmt3a)[-1] <- str_c("DNMT3A_", colnames(vaf_dnmt3a)[-1])
+
+# Merge
+vaf <- merge(vaf_tet2, vaf_idhs, by = c("Patient_ID_Timepoint"), all = TRUE)
+vaf <- merge(vaf, vaf_dnmt3a, by = c("Patient_ID_Timepoint"), all = TRUE)
+
+sample_table <- merge(sample_table, vaf, by = "Patient_ID_Timepoint",
+                      sort = FALSE, all.x = TRUE)
+```
+
+### Sorted blood cells
+- EPICv1 array data from:
+  - https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE167998
+- Excluded artificially mixed samples (MIX)
+```{r}
+#| label: Sorted blood cells
+fname <- "GSE167998_flow_sorted_blood_EPIC_beta_values"
+dt_blood <- readRDS(path(r_data_dir, fname, ext = "rds"))
+fname <- "GSE167998_flow_sorted_blood_EPIC_sample_table"
+sample_table_blood <- readRDS(path(r_data_dir, fname, ext = "rds"))
+# Check that the sample IDs match between the data and sample table
+stopifnot(identical(colnames(dt_blood)[-1], sample_table_blood[, Sample_ID]))
+sample_table_blood <- sample_table_blood[CellType != "MIX"]
+
+# Number of samples per cell type
+sample_table_blood[, .N, CellType]
+sample_ids <- sample_table_blood[, Sample_ID]
+dt_blood <- dt_blood[, .SD, .SDcols = c("ProbeID", sample_ids)]
+stopifnot(identical(colnames(dt_blood)[-1], sample_table_blood[, Sample_ID]))
+```
+
+### HSC and progenitor cells
+- HM450 array data from:
+  - https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE63409
+- Excluded AML LSCs and Blasts
+- Excluded low quality samples
+```{r}
+#| label: HSC and progenitor cells
+fname <- "GSE63409_hematopoietic_stem_progenitor_HM450_beta_values"
+dt_hsc <- readRDS(path(r_data_dir, fname, ext = "rds"))
+fname <- "GSE63409_hematopoietic_stem_progenitor_HM450_sample_table"
+sample_table_hsc <- readRDS(path(r_data_dir, fname, ext = "rds"))
+# Check that the sample IDs match between the data and sample table
+stopifnot(identical(colnames(dt_hsc)[-1], sample_table_hsc[, name]))
+sample_table_hsc <- sample_table_hsc[!cell_type %in% c("BLAST", "LSC")]
+sample_table_hsc <- sample_table_hsc[frac_dt_cg > 0.8]
+
+# Number of samples per cell type
+sample_table_hsc[, .N, cell_type]
+names <- sample_table_hsc[, name]
+dt_hsc <- dt_hsc[, .SD, .SDcols = c("ProbeID", names)]
+stopifnot(identical(colnames(dt_hsc)[-1], sample_table_hsc[, name]))
+probe_ids <- dt_hsc[, ProbeID]
+length(probe_ids)
+```
+
+### Probe annotations
+- EPICv1 probe manifest:
+  - https://zhouserver.research.chop.edu/InfiniumAnnotation
+- ENCODE Candidate Cis-Regulatory Elements (cCRE) annotations:
+  - https://screen.encodeproject.org/index/cversions
+  - Registry V2 (Version used in above-cited Nature paper)
+- TET2 mutation-associated hypermethylation signature
+  - https://pubmed.ncbi.nlm.nih.gov/34663818
+  - Previously defined as significantly hypermethylated in granulocyte from CCUS patients with TET2 mutations 
+  - 12,096 CpGs with p < 7.7e-6 as provided in Supplementary Data 3
+```{r}
+#| label: Probe manifest
+fname <- "EPICv1_manifest_hg38"
+dt_probes <- readRDS(path(r_data_dir, fname, ext = "rds"))
+fname <- "EVITA_DNA_methylation_EPIC_probe_metadata"
+probe_meta <- readRDS(path(r_data_dir, fname, ext = "rds"))
+
+# Subset probes from manifest
+dt_probes <- dt_probes[ProbeID %in% probe_ids]
+
+# CpG islands annotation
+dt_probes[, cgi := CGIposition %in% "Island"]
+
+# ENCODE PLS annotation
+probe_ids <- probe_meta[cCRE_ENCODE %like% "PLS", ProbeID]
+dt_probes[, encode_pls := ProbeID %in% probe_ids]
+
+# ENCODE dELS annotation
+probe_ids <- probe_meta[cCRE_ENCODE %like% "dELS", ProbeID]
+dt_probes[, encode_dels := ProbeID %in% probe_ids]
+
+# TET2 CCUS differential methylation
+probe_ids <- probe_meta[tet2mut_signature == TRUE, ProbeID]
+dt_probes[, tet2mut_signature := ProbeID %in% probe_ids]
+```
+
+### Probe filtering
+- Exclude problematic probes and non-CpG probes, and probes on the sex chromosomes and mitochondrial DNA
+```{r}
+#| label: Probe initial filtering
+dt_probes <- dt_probes[MASK_general == FALSE]
+dt_probes <- dt_probes[probeType == "cg"]
+dt_probes <- dt_probes[!(seqnames %in% c("chrX", "chrY", "chrM"))]
+probe_ids <- dt_probes[, ProbeID]
+dt <- dt[ProbeID %in% probe_ids]
+```
+- Select TET2mut methylation signature probes
+```{r}
+#| label: TET2mut signature selection
+probe_ids <- probe_meta[tet2mut_signature == TRUE, ProbeID]
+dt <- dt[ProbeID %in% probe_ids]
+```
+- Exclude probes with >20% missing data across all samples
+```{r}
+#| label: Missing data filtering
+probe_ids <- probe_meta[percent_missing_vals < 20, ProbeID]
+dt <- dt[ProbeID %in% probe_ids]
+```
+
+#### Sample ordering
+- Order samples by median DNA methylation across TET2mut hypermethylation signature probes
+```{r}
+#| label: Sample ordering
+sample_table <- sample_table[order(-median_tet2_sig)]
+idats_ordered <- sample_table[, IDAT]
+dt <- dt[, .SD, .SDcols = c("ProbeID", idats_ordered)]
+```
+
+### Heatmap data preparation
+```{r}
+#| label: Heatmap data preparation
+df <- as.matrix(dt, rownames = "ProbeID")
+dim(df)
+stopifnot(identical(colnames(df), sample_table[, IDAT]))
+```
+
+### Heatmap sample annotations
+```{r}
+#| label: heatmap sample annotations
+column_ha <- HeatmapAnnotation(
+  Sex = sample_table[, Sex],
+  Age = sample_table[, Age_inclusion_years],
+  Diagnosis = sample_table[, Diagnosis],
+  Treatment = sample_table[, Treatment_arm],
+  "DNMT3A VAF" = sample_table[, DNMT3A_AF],
+  "IDH VAF" = sample_table[, IDH_AF],
+  "TET2 VAF" = sample_table[, TET2_AF],
+  col = list(
+    Sex = sex_colors,
+    Age = col_fun_age,
+    Diagnosis = diagnosis_colors,
+    Treatment = treatment_arm_colors,
+    "DNMT3A VAF" = col_fun_turbo100,
+    "IDH VAF" = col_fun_turbo100,
+    "TET2 VAF" = col_fun_turbo100
+  ),
+  show_legend = FALSE,
+  show_annotation_name = TRUE,
+  gp = gpar(col = "black", lwd = 0),
+  simple_anno_size = unit(0.4, "cm")
+)
+stopifnot(identical(sample_table[, IDAT], colnames(df)))
+patient_ids <- unique(sample_table[, PatientID])
+patient_ids <- factor(sample_table[, PatientID], levels = patient_ids)
+```
+
+### Heatmap probe annotations
+```{r}
+#| label: heatmap probe annotations
+probe_ids <- rownames(df)
+dt_probes <- dt_probes[ProbeID %in% probe_ids]
+stopifnot(identical(dt_probes[, ProbeID], rownames(df)))
+row_ha <- rowAnnotation(
+  "CpG Island" = dt_probes[, cgi],
+  Promoter = dt_probes[, encode_pls],
+  Enhancer = dt_probes[, encode_dels],
+  col = list(
+    "CpG Island" = binary_colors,
+    Promoter = binary_colors,
+    Enhancer = binary_colors
+  ),
+  show_legend = FALSE,
+  show_annotation_name = TRUE,
+  annotation_name_side = "top"
+)
+```
+
+### Heatmap
+```{r}
+#| label: heatmap
+stopifnot(identical(colnames(df), sample_table[, IDAT]))
+ht <- Heatmap(df,
+  cluster_columns = FALSE,
+  show_column_dend = FALSE,
+  show_column_names = FALSE,
+  cluster_rows = TRUE,
+  show_row_dend = FALSE,
+  show_row_names = FALSE,
+  col = col_fun_turbo100,
+  top_annotation = column_ha,
+  left_annotation = row_ha,
+  show_heatmap_legend = TRUE,
+  heatmap_legend_param = list(title = "DNA methylation\nβ value"),
+  use_raster = FALSE,
+  border = FALSE,
+  border_gp = gpar(lwd = 1)
+)
+```
+- Draw heatmap and save the probe order
+```{r}
+#| fig-align: left
+#| dpi: 300
+#| fig-format: png
+#| out-width: "70%"
+#| out-height: "70%"
+ht_drawn <- draw(ht, background = "transparent")
+probe_order <- row_order(ht_drawn)
+probe_ids_ordered <- rownames(df)[probe_order]
+```
+- Draw heatmap sample color legends
+```{r}
+#| label: heatmap sample color legends
+column_legends <- packLegend(
+  Legend(
+    title = "Sex",
+    at = names(sex_colors),
+    legend_gp = gpar(fill = sex_colors)
+  ),
+  Legend(
+    title = "Age",
+    col_fun = col_fun_age,
+    title_gp = gpar(fontsize = 10),
+    direction = "horizontal"
+  ),
+  Legend(
+    title = "Diagnosis",
+    at = names(diagnosis_colors),
+    legend_gp = gpar(fill = diagnosis_colors)
+  ),
+  Legend(
+    title = "Treatment Arm",
+    at = names(treatment_arm_colors),
+    legend_gp = gpar(fill = treatment_arm_colors)
+  ),
+  Legend(
+    title = "VAF",
+    col_fun = col_fun_turbo100,
+    title_gp = gpar(fontsize = 10),
+    direction = "horizontal"
+  )
+)
+```
+```{r}
+#| fig-align: left
+#| dpi: 300
+#| fig-format: png
+#| out-width: "50%"
+#| out-height: "50%"
+draw(column_legends)
+```
+
+### HSC and progenitor cells heatmap
+```{r}
+#| label: HSC and progenitor cells heatmap
+dt_hsc <- dt_hsc[ProbeID %in% probe_ids_ordered]
+dt_hsc <- dt_hsc[match(probe_ids_ordered, ProbeID)]
+stopifnot(identical(dt_hsc[, ProbeID], probe_ids_ordered))
+stopifnot(identical(colnames(dt_hsc)[-1], sample_table_hsc[, name]))
+
+# Order of cell types
+cell_types <- c("HSC", "MPP", "LMPP", "CMP", "GMP", "MEP")
+dt_hsc_order <- data.table(
+  cell_types,
+  cell_type_order = 1:length(cell_types)
+)
+
+sample_table_hsc <- merge(
+  sample_table_hsc,
+  dt_hsc_order,
+  by.x = "cell_type",
+  by.y = "cell_types",
+  all.x = TRUE
+)
+
+sample_table_hsc <- sample_table_hsc[
+  order(cell_type_order)
+]
+sample_table_hsc[, cell_type := factor(cell_type, levels = cell_types)]
+sample_ids <- sample_table_hsc[, name]
+dt_hsc <- dt_hsc[, .SD, .SDcols = c("ProbeID", sample_ids)]
+df_hsc <- as.matrix(dt_hsc, rownames = "ProbeID")
+stopifnot(identical(colnames(df_hsc), sample_table_hsc[, name]))
+
+# Heatmap sample annotations
+column_ha_hsc <- HeatmapAnnotation(
+  Cell_Type = sample_table_hsc[, cell_type],
+  col = list(
+    Cell_Type = progenitor_colors
+  ),
+  show_legend = TRUE,
+  show_annotation_name = FALSE,
+  gp = gpar(col = "white", lwd = 0.1),
+  simple_anno_size = unit(0.6, "cm")
+)
+
+# Heatmap
+ht_hsc <- Heatmap(df_hsc,
+  cluster_columns = FALSE,
+  show_column_dend = FALSE,
+  show_column_names = FALSE,
+  column_split = sample_table_hsc[, cell_type],
+  column_gap = unit(0, "cm"),
+  cluster_column_slices = TRUE,
+  column_title = NULL,
+  top_annotation = column_ha_hsc,
+  cluster_rows = FALSE,
+  show_row_dend = FALSE,
+  show_row_names = FALSE,
+  col = col_fun_turbo100,
+  show_heatmap_legend = FALSE,
+  use_raster = FALSE,
+  border = FALSE,
+  border_gp = gpar(lwd = 0)
+)
+```
+```{r}
+#| fig-align: left
+#| dpi: 300
+#| fig-format: png
+#| out-width: "40%"
+#| out-height: "40%"
+ht_drawn <- draw(ht_hsc, background = "transparent")
+```
+
+### Sorted blood cells heatmap
+```{r}
+#| label: sorted blood cells heatmap
+dt_blood <- dt_blood[ProbeID %in% probe_ids_ordered]
+dt_blood <- dt_blood[match(probe_ids_ordered, ProbeID)]
+stopifnot(identical(dt_blood[, ProbeID], probe_ids_ordered))
+stopifnot(identical(colnames(dt_blood)[-1], sample_table_blood[, Sample_ID]))
+
+# Order of cell types
+cell_types <- c("CD4nv", "CD8nv", "Bnv",
+                "NK", "CD4mem", "Treg", "CD8mem", "Bmem",
+                "Bas", "Mono", "Eos", "Neu")
+dt_blood_order <- data.table(
+  cell_types,
+  cell_type_order = 1:length(cell_types)
+)
+sample_table_blood <- merge(
+  sample_table_blood,
+  dt_blood_order,
+  by.x = "CellType",
+  by.y = "cell_types",
+  all.x = TRUE
+)
+sample_table_blood <- sample_table_blood[order(cell_type_order)]
+sample_table_blood[, CellType := factor(CellType, levels = cell_types)]
+sample_ids <- sample_table_blood[, Sample_ID]
+dt_blood <- dt_blood[, .SD, .SDcols = c("ProbeID", sample_ids)]
+df_blood <- as.matrix(dt_blood, rownames = "ProbeID")
+stopifnot(identical(colnames(df_blood), sample_table_blood[, Sample_ID]))
+
+# Heatmap sample annotations
+column_ha_blood <- HeatmapAnnotation(
+  Cell_Type = sample_table_blood[, CellType],
+  col = list(
+    Cell_Type = sorted_blood_colors
+  ),
+  show_legend = TRUE,
+  show_annotation_name = FALSE,
+  gp = gpar(col = "white", lwd = 0.1),
+  simple_anno_size = unit(0.6, "cm")
+)
+
+# Heatmap
+ht_blood <- Heatmap(df_blood,
+  cluster_columns = FALSE,
+  show_column_dend = FALSE,
+  show_column_names = FALSE,
+  column_split = sample_table_blood[, CellType],
+  column_gap = unit(
+    c(
+      0, 0, 0.5,  # CD4nv to NK
+      0, 0, 0, 0, 0.5,  # NK to Bas
+      0, 0, 0  # Bas to Neu
+    ),
+    "cm"
+  ),
+  cluster_column_slices = TRUE,
+  column_title = NULL,
+  top_annotation = column_ha_blood,
+  cluster_rows = FALSE,
+  show_row_dend = FALSE,
+  show_row_names = FALSE,
+  col = col_fun_turbo100,
+  show_heatmap_legend = FALSE,
+  use_raster = FALSE,
+  border = FALSE,
+  border_gp = gpar(lwd = 1)
+)
+```
+```{r}
+#| fig-align: left
+#| dpi: 300
+#| fig-format: png
+#| out-width: "40%"
+#| out-height: "40%"
+ht_drawn <- draw(ht_blood, background = "transparent")
+```
+
+### R Session
+```{r}
+#| label: R Information
+sessionInfo()
+```
