@@ -1,0 +1,115 @@
+---
+title: Genomic feature overrepresentation analysis of distal enhancer CpGs
+editor_options: 
+  chunk_output_type: console
+---
+
+This script performs the genomic feature overrepresentation analysis of the differentially methylated CpGs in distal enhancer regions.
+
+<hr>
+
+### Load required R packages
+```{r}
+#| label: packages
+#| warning: false
+#| message: false
+.libPaths("/packages/")
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  tidyverse,
+  data.table,
+  fs,
+  sesame,
+  qs
+)
+path <- fs::path
+n_threads <- parallel::detectCores() - 2
+n_threads
+```
+
+### Project directory and data directory
+```{r}
+#| label: project setup
+#| warning: false
+#| message: false
+project_dir <- path("~/EVITA_EPIC_methylation_analysis")
+r_data_dir <- path(project_dir, "r_data")
+```
+
+### Regression results based on wild-type samples
+- Delta_beta_value_regression.qmd for details
+```{r}
+#| label: Wild-type regression results
+fname <- "EVITA_delta_betas_regression_results_wildtype"
+dt_results <- qread(path(r_data_dir, fname, ext = "qs"),
+                    nthreads = n_threads)
+dt <- dt_results$original
+dt
+```
+
+### Probe annotation and distal enhancer CpG selection
+- EPICv1 probe manifest:
+  - https://zhouserver.research.chop.edu/InfiniumAnnotation
+- ENCODE Candidate Cis-Regulatory Elements (cCRE) annotations:
+  - https://screen.encodeproject.org/index/cversions
+  - Registry V2 (Version used in above-cited Nature paper)
+```{r}
+#| label: Probe manifest
+fname <- "EPICv1_manifest_hg38"
+dt_probe <- readRDS(path(r_data_dir, fname, ext = "rds"))
+fname <- "EVITA_DNA_methylation_EPIC_probe_metadata"
+probe_meta <- readRDS(path(r_data_dir, fname, ext = "rds"))
+probe_ids <- probe_meta[cCRE_ENCODE %like% "dELS", ProbeID]
+dt_probe[, distal_enh := ProbeID %in% probe_ids]
+
+# Use as the universe set for the overrepresentation analysis
+probe_ids_subset <- dt_probe[distal_enh == TRUE, ProbeID]
+```
+
+### CpG overrepresentation analysis of distal enhancer CpGs
+```{r}
+#| label: CpG overrepresentation analysis
+# Subset to distal enhancer CpGs
+dt <- dt[ProbeID %in% probe_ids_subset]
+# CpGs that are significantly hypomethylated
+probe_ids <- dt[
+  pval_vit_c < 0.01 & b_vit_c < -0.05
+][
+  order(pval_vit_c), ProbeID
+]
+length(probe_ids)
+table <- testEnrichment(query = probe_ids,
+                        universe = probe_ids_subset,
+                        platform = "EPIC",
+                        silent = TRUE)
+table <- data.table(table)
+table <- table[group %in% c("KYCG.EPIC.TFBSconsensus.20211013",
+                            "KYCG.EPIC.tissueSignature.20211211")]
+table <- table[order(FDR, p.value)]
+table <- table[, .SD,
+               .SDcols = c("dbname",
+                           "overlap",
+                           "estimate",
+                           "p.value",
+                           "FDR")]
+setnames(table,
+         c("dbname", "estimate"),
+         c("Transcription_factor_or_tissue_signature",
+           "Odds_Ratio"))
+table <- table[order(FDR, p.value)]
+table[, Odds_Ratio := round(Odds_Ratio, 3)]
+table[, FDR := round(FDR, 3)]
+table[, p.value := formatC(p.value, format = "e", digits = 2)]
+table <- table[Odds_Ratio > 1.2 & FDR < 0.01]
+```
+```{r}
+#| label: display_table
+#| echo: false
+knitr::kable(table, caption = "Results")
+```
+
+### R Session
+```{r}
+#| label: R Information
+sessionInfo()
+```

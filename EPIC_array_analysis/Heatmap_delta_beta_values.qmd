@@ -1,0 +1,348 @@
+---
+title: Heatmap of delta DNA methylation values
+editor_options: 
+  chunk_output_type: console
+---
+
+This script generates a heatmap displaying the changes in DNA methylation (delta β values) from baseline to the end of treatment.<br>
+Gene promoter and distal enhancer CpGs that were hypomethylated in vitamin C-treated patients with wild-type TET2 and IDH1/2 are shown.
+
+<hr>
+
+### Load required R packages
+```{r}
+#| label: packages
+#| warning: false
+#| message: false
+.libPaths("/packages/")
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  matrixStats,
+  tidyverse,
+  data.table,
+  fs,
+  ComplexHeatmap,
+  viridis,
+  circlize,
+  qs
+)
+```
+
+### Project setup
+```{r}
+#| label: project setup
+#| warning: false
+#| message: false
+project_dir <- path("~/EVITA_EPIC_methylation_analysis")
+r_data_dir <- path(project_dir, "r_data")
+# Source color palettes
+source(path(project_dir, "EPIC_array_analysis_color_palettes.R"))
+# Set seed for reproducibility
+set.seed(1022)
+```
+
+### DNA methylation data loading
+- Delta β value matrix (End of treatment - Baseline) and sample metadata
+```{r}
+#| label: sample annotation
+fname <- "EVITA_DNA_methylation_EPIC_delta_beta_values"
+dt <- readRDS(path(r_data_dir, fname, ext = "rds"))
+fname <- "EVITA_DNA_methylation_EPIC_sample_table"
+sample_table <- readRDS(path(r_data_dir, fname, ext = "rds"))
+sample_table <- sample_table[Timepoint != "Baseline"]
+stopifnot(identical(colnames(dt)[-1], sample_table[, PatientID]))
+```
+
+### Somatic variant data processing
+- Select the highest VAF per patient for each gene
+```{r}
+#| label: Somatic variant data processing
+fname <- "EVITA_curated_variants_EPIC_analysis"
+vaf <- readRDS(path(r_data_dir, fname, ext = "rds"))
+vaf <- vaf[EPIC_Data == TRUE, .(Patient_ID_Timepoint, Hugo_Symbol, AF)]
+
+# TET2
+vaf_tet2 <- vaf[Hugo_Symbol == "TET2"]
+vaf_tet2 <- vaf_tet2[order(Patient_ID_Timepoint, AF, decreasing = TRUE)]
+vaf_tet2 <- vaf_tet2[!duplicated(Patient_ID_Timepoint)]
+colnames(vaf_tet2)[-1] <- str_c("TET2_", colnames(vaf_tet2)[-1])
+
+# IDH1/2
+vaf_idh1 <- vaf[Hugo_Symbol == "IDH1"]
+vaf_idh2 <- vaf[Hugo_Symbol == "IDH2"]
+vaf_idhs <- rbind(vaf_idh1, vaf_idh2)
+vaf_idhs[, Hugo_Symbol := "IDH"]
+colnames(vaf_idhs)[-1] <- str_c("IDH_", colnames(vaf_idhs)[-1])
+
+# DNMT3A
+vaf_dnmt3a <- vaf[Hugo_Symbol == "DNMT3A"]
+vaf_dnmt3a <- vaf_dnmt3a[order(Patient_ID_Timepoint, AF, decreasing = TRUE)]
+vaf_dnmt3a <- vaf_dnmt3a[!duplicated(Patient_ID_Timepoint)]
+colnames(vaf_dnmt3a)[-1] <- str_c("DNMT3A_", colnames(vaf_dnmt3a)[-1])
+
+# Merge VAF data
+vaf <- merge(vaf_tet2, vaf_idhs, by = c("Patient_ID_Timepoint"), all = TRUE)
+vaf <- merge(vaf, vaf_dnmt3a, by = c("Patient_ID_Timepoint"), all = TRUE)
+
+sample_table <- merge(sample_table, vaf, by = "Patient_ID_Timepoint",
+                      sort = FALSE, all.x = TRUE)
+```
+
+### Regression results for wild-type cases
+```{r}
+#| label: Regression results
+fname <- "EVITA_delta_betas_regression_results_wildtype"
+dt_results <- qread(path(r_data_dir, fname, ext = "qs"),
+                    nthreads = 8)
+dt_results <- dt_results$original
+dt_results
+```
+
+### Probe annotations and subsetting (gene promoter and distal enhancer CpGs)
+- EPICv1 probe manifest and probe-gene mapping:
+  - https://zhouserver.research.chop.edu/InfiniumAnnotation
+- ENCODE Candidate Cis-Regulatory Elements (cCRE) annotations:
+  - https://screen.encodeproject.org/index/cversions
+  - Registry V2 (Version used in above-cited Nature paper)
+- Promoter CpGs are defined as CpGs with a distance to the TSS less than 1500 bp
+```{r}
+#| label: Probe manifest
+fname <- "EPICv1_manifest_hg38"
+dt_probes <- readRDS(path(r_data_dir, fname, ext = "rds"))
+fname <- "EVITA_DNA_methylation_EPIC_probe_metadata"
+probe_meta <- readRDS(path(r_data_dir, fname, ext = "rds"))
+
+# CpG islands annotation
+dt_probes[, cgi := CGIposition %in% "Island"]
+
+# ENCODE distal enhancer annotation
+probe_ids <- probe_meta[cCRE_ENCODE %like% "dELS", ProbeID]
+dt_probes[, dist_enh := ProbeID %in% probe_ids]
+
+# Gene promoter annotation
+fname <- "EPICv1_manifest_hg38_probe_gene_mapping"
+gene_mapping <- readRDS(path(r_data_dir, fname, ext = "rds"))
+gene_mapping <- gene_mapping[order(ProbeID, absolute_dist_to_tss)]
+gene_mapping <- gene_mapping[!duplicated(Gene_probeID)]
+probe_ids <- gene_mapping[absolute_dist_to_tss < 1500, ProbeID]
+dt_probes[, tss_1500_cpgs := ProbeID %in% probe_ids]
+
+# Subset CpGs that are in gene promoter region or distal enhancer region
+probe_ids_subset <- dt_probes[tss_1500_cpgs == TRUE | dist_enh == TRUE, ProbeID]
+```
+
+### Significant CpG selection
+- Select CpGs that were hypomethylated in vitamin C-treated patients with wild-type TET2 and IDH1/2
+```{r}
+#| label: Significant CpG selection
+dt_results <- dt_results[ProbeID %in% probe_ids_subset]
+dt_results[pval_vit_c < 0.01 & b_vit_c < -0.05][order(-b_vit_c)]
+probe_ids <- dt_results[
+  pval_vit_c < 0.01 & b_vit_c < -0.05
+][
+  order(pval_vit_c), ProbeID
+]
+```
+
+### Heatmap data preparation
+- Clip the delta β values to between -0.3 and 0.3
+```{r}
+#| label: Heatmap data preparation
+dt <- dt[ProbeID %in% probe_ids]
+df <- as.matrix(dt, rownames = "ProbeID")
+df <- pmax(pmin(df, 0.3), -0.3)
+dim(df)
+stopifnot(identical(colnames(df), sample_table[, PatientID]))
+```
+
+### Determine sample order for heatmap
+```{r}
+#| label: Sample order
+sample_table[, TET2_IDH := ifelse(TET2 == 1 | IDH == 1, "Mutant", "Wildtype")]
+sample_table[, .N, TET2_IDH]
+sample_table[, order_mut := 1]
+sample_table[TET2_IDH == "Wildtype", order_mut := 2]
+sample_table[, order_treatment := 1]
+sample_table[Treatment_arm == "Vitamin C", order_treatment := 2]
+sample_table <- sample_table[order(order_mut, order_treatment, PatientID)]
+patient_ids <- sample_table[, PatientID]
+df <- df[, patient_ids]
+stopifnot(identical(colnames(df), sample_table[, PatientID]))
+```
+
+### Heatmap split by mutation status and treatment arm
+```{r}
+#| label: Heatmap split by mutation status and by treatment arm
+mut_idx <- sample_table[, TET2_IDH] == "Mutant"
+wt_idx <- sample_table[, TET2_IDH] == "Wildtype"
+
+df_mut <- df[, mut_idx]
+df_wt <- df[, wt_idx]
+
+sample_table_mut <- sample_table[mut_idx]
+sample_table_wt <- sample_table[wt_idx]
+
+# Heatmap sample annotations
+column_ha_mut <- HeatmapAnnotation(
+  Sex = sample_table_mut[, Sex],
+  Age = sample_table_mut[, Age_inclusion_years],
+  Diagnosis = sample_table_mut[, Diagnosis],
+  DNMT3A_VAF = sample_table_mut[, DNMT3A_AF],
+  IDH_VAF = sample_table_mut[, IDH_AF],
+  TET2_VAF = sample_table_mut[, TET2_AF],
+  Treatment_Arm = sample_table_mut[, Treatment_arm],
+  col = list(
+    Sex = sex_colors,
+    Age = col_fun_age,
+    Diagnosis = diagnosis_colors,
+    DNMT3A_VAF = col_fun_turbo100,
+    IDH_VAF = col_fun_turbo100,
+    TET2_VAF = col_fun_turbo100,
+    Treatment_Arm = treatment_arm_colors
+  ),
+  show_annotation_name = FALSE,
+  show_legend = FALSE,
+  gp = gpar(col = "black", lwd = 0),
+  simple_anno_size = unit(0.4, "cm")
+)
+
+column_ha_wt <- HeatmapAnnotation(
+  Sex = sample_table_wt[, Sex],
+  Age = sample_table_wt[, Age_inclusion_years],
+  Diagnosis = sample_table_wt[, Diagnosis],
+  "DNMT3A VAF" = sample_table_wt[, DNMT3A_AF],
+  "IDH VAF" = sample_table_wt[, IDH_AF],
+  "TET2 VAF" = sample_table_wt[, TET2_AF],
+  Treatment = sample_table_wt[, Treatment_arm],
+  col = list(
+    Sex = sex_colors,
+    Age = col_fun_age,
+    Diagnosis = diagnosis_colors,
+    "DNMT3A VAF" = col_fun_turbo100,
+    "IDH VAF" = col_fun_turbo100,
+    "TET2 VAF" = col_fun_turbo100,
+    Treatment = treatment_arm_colors
+  ),
+  show_annotation_name = TRUE,
+  show_legend = FALSE,
+  gp = gpar(col = "black", lwd = 0),
+  simple_anno_size = unit(0.4, "cm")
+)
+
+# Heatmap probe annotations
+probe_ids <- rownames(df_mut)
+length(probe_ids)
+dt_probes <- dt_probes[ProbeID %in% probe_ids]
+stopifnot(identical(dt_probes[, ProbeID], rownames(df_mut)))
+row_ha_binary <- rowAnnotation(
+  "CpG Island" = dt_probes[, cgi],
+  Promoter = dt_probes[, tss_1500_cpgs],
+  Enhancer = dt_probes[, dist_enh],
+  col = list(
+    "CpG Island" = binary_colors,
+    Promoter = binary_colors,
+    Enhancer = binary_colors
+  ),
+  show_legend = FALSE,
+  show_annotation_name = TRUE,
+  annotation_name_side = "top"
+)
+
+# Heatmaps
+ht_mut <- Heatmap(df_mut,
+  cluster_columns = FALSE,
+  show_column_dend = FALSE,
+  show_column_names = FALSE,
+  column_split = sample_table_mut[, Treatment_arm],
+  column_gap = unit(1, "mm"),
+  cluster_column_slices = FALSE,
+  column_names_rot = 45,
+  cluster_rows = TRUE,
+  show_row_dend = FALSE,
+  show_row_names = FALSE,
+  col = col_fun_delta,
+  top_annotation = column_ha_mut,
+  left_annotation = row_ha_binary,
+  show_heatmap_legend = FALSE,
+  column_title = "Mutant",
+  column_title_gp = gpar(fontsize = 12, fontface = "bold"),
+  use_raster = FALSE,
+  border = TRUE,
+  border_gp = gpar(lwd = 0.2)
+)
+
+ht_wt <- Heatmap(df_wt,
+  cluster_columns = FALSE,
+  show_column_dend = FALSE,
+  show_column_names = FALSE,
+  column_split = sample_table_wt[, Treatment_arm],
+  column_gap = unit(1, "mm"),
+  cluster_column_slices = FALSE,
+  column_names_rot = 45,
+  cluster_rows = TRUE,
+  show_row_dend = FALSE,
+  show_row_names = FALSE,
+  col = col_fun_delta,
+  top_annotation = column_ha_wt,
+  show_heatmap_legend = TRUE,
+  heatmap_legend_param = list(title = "Delta β\nvalue"),
+  column_title = "Wildtype",
+  column_title_gp = gpar(fontsize = 12, fontface = "bold"),
+  use_raster = FALSE,
+  border = TRUE,
+  border_gp = gpar(lwd = 0.2)
+)
+```
+```{r}
+#| label: heatmap plot
+#| fig-align: left
+#| dpi: 300
+#| fig-format: png
+#| out-width: "70%"
+#| out-height: "70%"
+ht_list <- ht_mut + ht_wt
+ht_drawn <- draw(ht_list, gap = unit(0.5, "cm"))
+```
+
+### Heatmap sample color legends
+```{r}
+#| label: heatmap sample color legends
+column_legends <- packLegend(
+  Legend(title = "Sex",
+         at = names(sex_colors),
+         legend_gp = gpar(fill = sex_colors)),
+
+  Legend(title = "Age",
+         col_fun = col_fun_age,
+         title_gp = gpar(fontsize = 10),
+         direction = "horizontal"),
+
+  Legend(title = "Diagnosis",
+         at = names(diagnosis_colors),
+         legend_gp = gpar(fill = diagnosis_colors)),
+
+  Legend(title = "VAF",
+         col_fun = col_fun_turbo100,
+         title_gp = gpar(fontsize = 10),
+         direction = "horizontal"),
+
+  Legend(title = "Treatment",
+         at = names(treatment_arm_colors),
+         legend_gp = gpar(fill = treatment_arm_colors))
+)
+```
+```{r}
+#| label: color legends
+#| fig-align: left
+#| dpi: 300
+#| fig-format: png
+#| out-width: "50%"
+#| out-height: "50%"
+draw(column_legends)
+```
+
+### R Session
+```{r}
+#| label: R Information
+sessionInfo()
+```

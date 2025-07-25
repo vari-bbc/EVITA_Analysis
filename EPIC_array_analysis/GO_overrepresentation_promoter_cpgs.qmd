@@ -1,0 +1,159 @@
+---
+title: GO term overrepresentation analysis of genepromoter CpGs
+editor_options: 
+  chunk_output_type: console
+---
+
+This script performs a gene ontology (GO) term overrepresentation analysis on the differentially methylated CpGs in gene promoter regions.
+
+<hr>
+
+### Required packages
+```{r}
+#| label: Setup
+#| warning: false
+.libPaths("/packages/")
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  tidyverse,
+  data.table,
+  fs,
+  clusterProfiler,
+  org.Hs.eg.db,
+  qs
+)
+path <- fs::path
+```
+
+### Project setup
+```{r}
+#| label: project setup
+#| warning: false
+project_dir <- path("~/EVITA_EPIC_methylation_analysis")
+r_data_dir <- path(project_dir, "r_data")
+```
+
+### Regression results based on wild-type samples
+- Delta_beta_value_regression.qmd for details
+```{r}
+#| label: Wild-type regression results
+fname <- "EVITA_delta_betas_regression_results_wildtype"
+dt_results <- qread(path(r_data_dir, fname, ext = "qs"))
+dt <- dt_results$original
+dt
+```
+
+### Probe annotation and subsetting (gene promoter CpGs)
+- EPICv1 probe manifest and probe-gene mapping:
+  - https://zhouserver.research.chop.edu/InfiniumAnnotation
+- Promoter CpGs are defined as 1500 bp flanking regions upstream and downstream of transcription start sites (TSS)
+```{r}
+#| label: Probe manifest
+fname <- "EPICv1_manifest_hg38"
+dt_probe <- readRDS(path(r_data_dir, fname, ext = "rds"))
+
+# Gene promoter annotation
+fname <- "EPICv1_manifest_hg38_probe_gene_mapping"
+gene_mapping <- readRDS(path(r_data_dir, fname, ext = "rds"))
+gene_mapping <- gene_mapping[order(ProbeID, absolute_dist_to_tss)]
+gene_mapping <- gene_mapping[!duplicated(Gene_probeID)]
+probe_ids <- gene_mapping[absolute_dist_to_tss < 1500, ProbeID]
+dt_probe[, tss_1500 := ProbeID %in% probe_ids]
+probe_ids_subset <- dt_probe[tss_1500 == TRUE, ProbeID]
+
+# Subset the regression results to promoter CpGs
+dt <- dt[ProbeID %in% probe_ids_subset]
+
+# Merge with gene mapping annotation
+dt <- merge(dt, gene_mapping, by = "ProbeID")
+
+# Subset to promoter CpGs
+dt <- dt[absolute_dist_to_tss < 1500]
+dt <- dt[order(ProbeID, absolute_dist_to_tss)][!duplicated(ProbeID)]
+dt <- dt[b_vit_c < -0.05 & pval_vit_c < 0.01][order(pval_vit_c)]
+```
+
+### Identify Entrez IDs and full gene names
+```{r}
+#| label: Entrez IDs and full gene names
+gene_name <- unique(dt[, GeneName])
+annot <- AnnotationDbi::select(org.Hs.eg.db,
+                               keys = gene_name,
+                               columns = c("GENENAME", "ENTREZID"),
+                               keytype = "SYMBOL")
+setDT(annot)
+setnames(annot, "SYMBOL", "Symbol")
+```
+
+### Run GO overrepresentation analysis
+```{r}
+#| label: GO overrepresentation analysis
+ggo <- enrichGO(
+  gene = annot[, ENTREZID],
+  universe = keys(org.Hs.eg.db),
+  keyType = "ENTREZID",
+  OrgDb = org.Hs.eg.db,
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  readable = TRUE
+)
+dt <- data.table(ggo@result)
+
+# Odds Ratio calculation
+gene_ratio <- as.data.table(
+  str_split(
+    dt[, GeneRatio],
+    pattern = "/",
+    simplify = TRUE
+  )
+)
+bg_ratio <- as.data.table(
+  str_split(
+    dt[, BgRatio],
+    pattern = "/",
+    simplify = TRUE
+  )
+)
+setnames(bg_ratio, c("V3", "V4"))
+dt_or <- cbind(gene_ratio, bg_ratio)
+dt_or <- dt_or[, lapply(.SD, as.numeric)]
+dt_or[, V2 := V2 - V1]
+dt_or[, V4 := V4 - V3]
+dt_or[, OR := (V1 / V2) / (V3 / V4)]
+
+dt <- cbind(dt, dt_or)
+dt <- dt[order(p.adjust)]
+table <- dt[
+  p.adjust < 0.05,
+  .(
+    ID,
+    Description,
+    Count,
+    round(OR, 2),
+    round(p.adjust, 3)
+  )
+]
+setnames(
+  table,
+  c(
+    "Gene_ontology_term",
+    "Description",
+    "Gene_count",
+    "Odds_ratio",
+    "FDR_adjusted_Pvalue"
+  )
+)
+```
+```{r}
+#| label: display_table
+#| echo: false
+knitr::kable(table, caption = "Enrichment Results")
+```
+
+## R Session
+```{r}
+#| label: R Information
+sessionInfo()
+```
